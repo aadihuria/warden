@@ -46,11 +46,14 @@ inline int run_all() {
 #define WTEST_CONCAT_(a, b) a##b
 #define WTEST_CONCAT(a, b) WTEST_CONCAT_(a, b)
 
+// static: each test function must have internal linkage, otherwise two
+// test files with a TEST_CASE on the same line number (e.g. both file's
+// Nth line) collide at link time with a duplicate symbol error.
 #define TEST_CASE(name)                                                 \
-    void WTEST_CONCAT(wtest_fn_, __LINE__)();                           \
+    static void WTEST_CONCAT(wtest_fn_, __LINE__)();                    \
     static wtest::Registrar WTEST_CONCAT(wtest_reg_, __LINE__)(         \
         name, &WTEST_CONCAT(wtest_fn_, __LINE__));                      \
-    void WTEST_CONCAT(wtest_fn_, __LINE__)()
+    static void WTEST_CONCAT(wtest_fn_, __LINE__)()
 
 #define REQUIRE(cond)                                                   \
     do {                                                                \

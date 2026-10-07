@@ -13,21 +13,21 @@
 //
 //   2. On a tools/call RESPONSE (child -> us -> client), if the tool is
 //      configured as "ingests_untrusted" (reads web pages, email, etc.),
-//      the response content is folded into the session's TaintLineage as
-//      an UNTRUSTED_EXTERNAL span before being forwarded on unchanged.
+//      the response content is stored as a Span (actual text, not just a
+//      hash) before being forwarded on unchanged.
 //
-// IMPORTANT M0 SIMPLIFICATION (see DESIGN.md section 4.1 and NOTES.md):
-// taint is tracked at SESSION granularity here, not via the citation-based
-// per-action dataflow the full design calls for. That means: once any
-// untrusted content has been read in a session, Warden conservatively
-// treats every subsequent high-risk action as potentially justified by it,
-// until the session ends. This is the correct fail-closed default for a
-// first milestone, and it is exactly what the M0 deliverable in
-// DESIGN.md asks for ("a crafted poisoned webpage causes a deny/escalate
-// that an unprotected setup would have allowed") — but it will over-block
-// in a long-running session that reads untrusted content once and then
-// does unrelated high-risk work. Per-action citation-based taint
-// (DESIGN.md 4.1) is the fix, scheduled for M1/M2.
+// Taint is now attributed PER ACTION (see M1 fix in NOTES.md), not at
+// whole-session granularity: when a high-risk tool call comes in, its
+// argument text is compared against every known span's content via
+// warden::attribute_taint() (token-overlap heuristic — see
+// include/warden/attribution.hpp), and only spans with real textual
+// overlap contribute taint to THIS action's TaintLineage. An action
+// whose arguments have nothing to do with any untrusted span is
+// evaluated as clean, even if the session touched untrusted content
+// elsewhere. This replaced an earlier whole-session-taint version after
+// M1 benchmarking measured a 100% false-positive rate on ordinary
+// read-then-communicate workflows under the old approach — see NOTES.md
+// for the measured before/after.
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "json.hpp"
+#include "warden/attribution.hpp"
 #include "warden/policy.hpp"
 #include "warden/taint.hpp"
 
@@ -78,6 +79,27 @@ int64_t now_unix_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+// Concatenates every string/number leaf value in a JSON value into one
+// text blob, for comparing a tool call's arguments against known spans.
+// Keys are deliberately ignored — we care about the content being passed
+// around, not argument names.
+void collect_text(const json& j, std::string& out) {
+    if (j.is_string()) {
+        out += ' ';
+        out += j.get<std::string>();
+    } else if (j.is_number()) {
+        out += ' ';
+        out += j.dump();
+    } else if (j.is_object()) {
+        for (auto& [k, v] : j.items()) {
+            (void)k;
+            collect_text(v, out);
+        }
+    } else if (j.is_array()) {
+        for (auto& v : j) collect_text(v, out);
+    }
 }
 
 struct ToolConfig {
@@ -209,8 +231,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::mutex taint_mu;
-    TaintLineage session_taint;
+    std::mutex spans_mu;
+    std::vector<Span> known_spans;
 
     std::mutex pending_mu;
     std::unordered_map<std::string, std::string> pending_tool_by_id;  // json id dump -> tool name
@@ -241,24 +263,24 @@ int main(int argc, char** argv) {
                     auto tc_it = tools.find(tool_name);
                     if (!tool_name.empty() && tc_it != tools.end() &&
                         tc_it->second.ingests_untrusted) {
-                        ProvenanceEnvelope env;
-                        env.span_id = gen_span_id();
-                        env.source_id = tool_name;
-                        env.trust_tier = TrustTier::UntrustedExternal;
-                        env.content_hash = std::to_string(fnv1a(msg["result"].dump()));
-                        env.ingested_at_unix_ms = now_unix_ms();
+                        std::string content_text;
+                        collect_text(msg["result"], content_text);
 
-                        TrustTier new_min;
+                        Span span;
+                        span.span_id = gen_span_id();
+                        span.source_id = tool_name;
+                        span.trust_tier = TrustTier::UntrustedExternal;
+                        span.content = content_text;
+
                         {
-                            std::lock_guard<std::mutex> lk(taint_mu);
-                            session_taint.absorb(env, 1.0);
-                            new_min = session_taint.min_trust_tier;
+                            std::lock_guard<std::mutex> lk(spans_mu);
+                            known_spans.push_back(span);
                         }
                         audit.record({{"event", "ingest"},
                                        {"tool", tool_name},
-                                       {"span_id", env.span_id},
-                                       {"trust_tier", to_string(env.trust_tier)},
-                                       {"session_min_trust_tier", to_string(new_min)}});
+                                       {"span_id", span.span_id},
+                                       {"trust_tier", to_string(span.trust_tier)},
+                                       {"content_hash", std::to_string(fnv1a(content_text))}});
                     }
                 }
             } catch (const std::exception&) {
@@ -281,13 +303,19 @@ int main(int argc, char** argv) {
                 auto tc_it = tools.find(tool_name);
                 if (tc_it != tools.end()) risk = tc_it->second.risk_class;
 
-                TaintLineage snapshot;
-                {
-                    std::lock_guard<std::mutex> lk(taint_mu);
-                    snapshot = session_taint;
+                std::string action_text;
+                if (msg["params"].contains("arguments")) {
+                    collect_text(msg["params"]["arguments"], action_text);
                 }
 
-                PolicyResult pres = policy.evaluate({tool_name, risk, snapshot});
+                std::vector<Span> spans_snapshot;
+                {
+                    std::lock_guard<std::mutex> lk(spans_mu);
+                    spans_snapshot = known_spans;
+                }
+
+                TaintLineage lineage = attribute_taint(action_text, spans_snapshot);
+                PolicyResult pres = policy.evaluate({tool_name, risk, lineage});
 
                 audit.record({{"event", "decision"},
                                {"tool", tool_name},
@@ -296,7 +324,9 @@ int main(int argc, char** argv) {
                                              : pres.decision == Decision::Deny   ? "deny"
                                                                                   : "escalate"},
                                {"reason", pres.reason},
-                               {"session_min_trust_tier", to_string(snapshot.min_trust_tier)}});
+                               {"action_min_trust_tier", to_string(lineage.min_trust_tier)},
+                               {"action_confidence", lineage.confidence},
+                               {"matched_span_ids", lineage.contributing_span_ids}});
 
                 if (pres.decision != Decision::Allow) {
                     forward = false;

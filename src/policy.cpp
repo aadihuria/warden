@@ -41,9 +41,25 @@ PolicyResult PolicyEngine::evaluate(const PolicyInput& input) const {
     // escalate to yet.
     if (input.risk_class == ActionRiskClass::ExternalComm) {
         if (tier == TrustTier::UntrustedExternal) {
-            return {Decision::Deny,
-                    "external communication justified by untrusted external "
-                    "content (min_trust_tier=UNTRUSTED_EXTERNAL)"};
+            // A span only enters the lineage at all once its content
+            // overlaps the action above attribute_taint()'s match
+            // threshold, so confidence here is already bounded away from
+            // zero. Split on a second, higher bar: strong textual overlap
+            // denies outright, weaker (but still above the inclusion
+            // threshold) overlap escalates instead, since it's more
+            // likely to be a coincidental match than a clean citation.
+            if (input.taint_lineage.confidence >= 0.4) {
+                return {Decision::Deny,
+                        "external communication strongly justified by untrusted "
+                        "external content (confidence=" +
+                            std::to_string(input.taint_lineage.confidence) + ")"};
+            }
+            return {Decision::EscalateToQuorum,
+                    "external communication weakly linked to untrusted external "
+                    "content (confidence=" +
+                        std::to_string(input.taint_lineage.confidence) +
+                        ") — requires quorum (not yet implemented in M0, see "
+                        "DESIGN.md M3)"};
         }
         if (tier == TrustTier::UntrustedInternal) {
             return {Decision::EscalateToQuorum,

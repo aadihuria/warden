@@ -14,6 +14,7 @@ option(WARDEN_ENABLE_SANITIZERS "Build with ASan/UBSan enabled" OFF)
 add_library(warden_core STATIC
     src/taint.cpp
     src/policy.cpp
+    src/attribution.cpp
 )
 target_include_directories(warden_core PUBLIC include)
 
@@ -28,6 +29,7 @@ target_link_libraries(warden-proxy PRIVATE Threads::Threads)
 add_executable(warden_tests
     tests/test_taint.cpp
     tests/test_policy.cpp
+    tests/test_attribution.cpp
     tests/main.cpp
 )
 target_link_libraries(warden_tests PRIVATE warden::core)

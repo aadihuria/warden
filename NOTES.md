@@ -239,15 +239,38 @@ Measuring this and writing it down honestly — rather than stopping at
 the clean 0%/0% final numbers — is the actual point of having a
 benchmark harness at all.
 
+## Real model-backed verifier (`include/warden/anthropic_verifier.hpp`)
+
+Implemented `AnthropicVerifier`: calls the real Anthropic Messages API
+(model defaults to `claude-haiku-4-5-20251001` — deliberately a small/
+cheap/fast model, since this is a bounded classification task, not open-
+ended reasoning) with the proposed action + evidence excerpts, asks for a
+strict JSON vote, and parses it. The system prompt explicitly instructs
+the model to treat evidence excerpts as DATA, never as instructions —
+the same "contained reasoning" framing as the stub verifiers, but backed
+by actual judgment instead of pattern matching, which is the real fix for
+the two gaps the stub quorum left open (keyword-evasion by paraphrase,
+no real second signal for destination-less risk classes).
+
+Wired into `proxy_main.cpp` as the quorum's third verifier, auto-
+upgrading from the free `AlwaysApproveVerifier` stub the moment
+`ANTHROPIC_API_KEY` is set in the environment — no other code change
+needed. No key -> proxy behaves exactly as before (free, deterministic);
+key present -> every quorum-escalated action makes one real, billed API
+call. Verified the live code path end-to-end with a deliberately invalid
+key: the HTTP call fires, a 401 comes back, the verifier abstains with a
+clear reason, and the quorum still resolves correctly around that
+abstain — no crash, no silent failure. Have not yet run it against a
+*valid* key / the real benchmark suite — that's a deliberate, explicit
+choice (real API cost), left for whoever runs it next. Fail-safe by
+construction: any HTTP error, non-200 response, or unparseable model
+output abstains rather than silently approving or crashing the proxy.
+
 ## Next steps (not started)
 
-- Replace `AlwaysApproveVerifier` with a real second signal for
-  destination-less risk classes (FINANCIAL, CODE_EXEC, IRREVERSIBLE_WRITE
-  without a recipient field) — the current quorum has a real coverage
-  gap there (see M3 section above), not just for this fixture set.
-- Integrate a real model-backed verifier (`AnthropicBackend` stub in
-  `scripts/benchmark/agent_backends.py`) — this is the actual fix for
-  keyword-evasion, not a longer marker list.
+- Run the live verifier for real (valid API key) against the benchmark
+  suite to get an actual before/after number with a real model in the
+  quorum, not just the stub-quorum numbers above.
 - Integrate the real AgentDojo / InjecAgent corpora in place of the
   hand-authored fixtures (loader swap, see `scripts/benchmark/README.md`).
 - Swap FNV-1a for SHA-256 before `content_hash` is used anywhere

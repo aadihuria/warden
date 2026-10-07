@@ -76,11 +76,21 @@ backend and the local scenario server. Prints a summary and writes
 
 ## Plugging in a real model
 
-`agent_backends.py::AnthropicBackend` is where a real Claude-driven agent
-loop goes: on each turn, send the conversation + available tools (derived
-from the scenario's `tools` block) to the Messages API with tool use
-enabled, let the model decide, and feed its tool call to the same
-`send_call_fn` the stub backend uses. It's intentionally left unimplemented
-— it needs a real API key and will incur real (small) per-run cost, which
-is a call for whoever runs it, not something to wire up silently. See the
-class docstring for the exact interface it needs to satisfy.
+`agent_backends.py::AnthropicBackend` (the agent loop that DECIDES what
+tool to call) is still unimplemented — it needs a real API key and will
+incur real per-run cost, which is a call for whoever runs it, not
+something to wire up silently. See the class docstring for the interface
+it needs to satisfy.
+
+**The quorum's third VERIFIER is different: it's already implemented**
+(`include/warden/anthropic_verifier.hpp` / `src/anthropic_verifier.cpp`,
+C++, not Python) and auto-upgrades from a free no-op stub
+(`AlwaysApproveVerifier`) to a real Claude Haiku-backed verifier the
+moment `ANTHROPIC_API_KEY` is set in the environment — no code change
+needed, see `src/proxy_main.cpp`. **This means: if you run
+`runner.py` with `ANTHROPIC_API_KEY` exported, every scenario that hits
+the quorum path (currently the benign ones, by design — see NOTES.md)
+will make a real, billed API call.** Cheap (Haiku, ~300 max output
+tokens, short prompts, a handful of scenarios) but not free — unset the
+key if you want the free/deterministic run, export it when you
+deliberately want to measure the live-verifier quorum.

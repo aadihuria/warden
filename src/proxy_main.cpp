@@ -34,6 +34,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -45,6 +46,7 @@
 #include <vector>
 
 #include "json.hpp"
+#include "warden/anthropic_verifier.hpp"
 #include "warden/attribution.hpp"
 #include "warden/policy.hpp"
 #include "warden/quorum.hpp"
@@ -274,11 +276,32 @@ int main(int argc, char** argv) {
     }
     int required_approvals = cfg.value("quorum_required_approvals", 2);
 
+    // The third verifier upgrades automatically from a no-op stub to a
+    // real model-backed verifier (see include/warden/anthropic_verifier.hpp)
+    // when ANTHROPIC_API_KEY is set in the environment. This closes the
+    // coverage gap documented in NOTES.md's M3 section (AlwaysApprove
+    // contributes nothing for risk classes with no destination field) —
+    // but it also means a real, billed API call per quorum-escalated
+    // action once a key is present. No key -> unchanged, free, fully
+    // deterministic behavior, so the existing test suite and benchmark
+    // stay cost-free.
+    std::shared_ptr<Verifier> third_verifier;
+    const char* api_key_env = std::getenv("ANTHROPIC_API_KEY");
+    if (api_key_env != nullptr && api_key_env[0] != '\0') {
+        std::string model = cfg.value("quorum_verifier_model", std::string("claude-haiku-4-5-20251001"));
+        third_verifier = std::make_shared<AnthropicVerifier>(std::string(api_key_env), model);
+        std::cerr << "[warden] third quorum verifier: live Anthropic model (" << model << ")\n";
+    } else {
+        third_verifier = std::make_shared<AlwaysApproveVerifier>();
+        std::cerr << "[warden] third quorum verifier: stub (set ANTHROPIC_API_KEY to use a "
+                     "real model-backed verifier)\n";
+    }
+
     QuorumVerifier quorum(
         {std::make_shared<KeywordInjectionVerifier>(),
          std::make_shared<ArgumentDestinationVerifier>(
              std::vector<std::string>{"to", "channel"}, trusted_destinations),
-         std::make_shared<AlwaysApproveVerifier>()},
+         third_verifier},
         required_approvals);
 
     // child stdout -> our stdout, tagging taint on untrusted-content tool

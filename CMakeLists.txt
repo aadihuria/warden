@@ -11,14 +11,18 @@ endif()
 
 option(WARDEN_ENABLE_SANITIZERS "Build with ASan/UBSan enabled" OFF)
 
+find_package(CURL REQUIRED)
+
 add_library(warden_core STATIC
     src/taint.cpp
     src/policy.cpp
     src/attribution.cpp
     src/quorum.cpp
     src/verifiers.cpp
+    src/anthropic_verifier.cpp
 )
-target_include_directories(warden_core PUBLIC include)
+target_include_directories(warden_core PUBLIC include third_party)
+target_link_libraries(warden_core PUBLIC CURL::libcurl)
 
 add_library(warden::core ALIAS warden_core)
 

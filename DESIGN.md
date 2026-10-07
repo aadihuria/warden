@@ -213,8 +213,8 @@ Event {
 ## 5. What to build, in order (milestones for the implementing agent)
 
 **M0 — Core taint + policy engine (single agent, no quorum, no CRDT).**
-- Rust core crate: provenance envelope types, trust lattice, taint propagation via citation-parsing + embedding-similarity fallback.
-- MCP proxy (Rust, tokio + tonic/gRPC or plain JSON-RPC over stdio/HTTP matching MCP spec) that wraps a real MCP server transparently.
+- C++ core library (C++20): provenance envelope types, trust lattice, taint propagation via citation-parsing + embedding-similarity fallback.
+- MCP proxy (C++, Boost.Asio or a lightweight io_uring-based event loop + gRPC C++ for the quorum/ledger services, or plain JSON-RPC over stdio/HTTP matching MCP spec) that wraps a real MCP server transparently.
 - Taint-aware policy DSL + evaluator (small hand-rolled interpreter is fine; don't over-engineer with a full Rego VM initially).
 - Deliverable: point Claude (via MCP) at a filesystem + web-fetch MCP server through Warden; demonstrate a crafted "poisoned webpage" causes a `deny`/`escalate` that an unprotected setup would have allowed.
 
@@ -232,7 +232,7 @@ Event {
 - Byzantine-tolerant quorum logic with configurable N/f, unit-tested the way Raft leader election was fault-injection-tested in Concord.
 
 **M4 — CRDT audit ledger + attribution tooling.**
-- Replicated, hash-chained event log using OR-Set/RGA merge semantics (direct reuse of Concord's CRDT layer, PyO3/gRPC bindings already exist in that codebase and can be adapted).
+- Replicated, hash-chained event log using OR-Set/RGA merge semantics (reuse the CRDT design from the Concord project; reimplement the layer in C++ and expose it via a gRPC service plus a thin Python binding, e.g. pybind11, for the attribution CLI/dashboard).
 - Build a small attribution CLI/dashboard: given a bad-outcome event_id, walk `contributing_span_ids` backward and print the responsible agent/tool/source chain.
 - Fault-injection test: partition two Warden replicas, generate decisions on both sides, heal partition, assert deterministic merge with no lost/duplicated audit events (same test discipline as Concord's network-partition tests).
 
@@ -257,7 +257,7 @@ Event {
 
 ## 7. Threat model and explicit non-goals
 
-**In scope:** indirect prompt injection via tool outputs, RAG documents, emails, web content; multi-agent coordination failures that cause misattributed/unbounded blast radius; supply-chain-adjacent risk in the sense that Warden itself must be auditable (open-source, small trusted-computing-base core in Rust).
+**In scope:** indirect prompt injection via tool outputs, RAG documents, emails, web content; multi-agent coordination failures that cause misattributed/unbounded blast radius; supply-chain-adjacent risk in the sense that Warden itself must be auditable (open-source, small trusted-computing-base core in C++, built with sanitizers — ASan/UBSan/TSan — on in CI given the memory-safety responsibility of a C++ security proxy).
 
 **Explicitly out of scope (state this plainly in the doc/paper — reviewers respect a scoped claim far more than an oversold one):**
 - Warden does not detect or prevent model weight-level backdoors or training-time poisoning.
@@ -274,7 +274,7 @@ This isn't a generic "add guardrails to an LLM" project — it's assembled almos
 - **Concord** (hand-rolled Raft + CRDT layer, 202k ops/sec, fault-injection-tested) → directly supplies the quorum-verifier consensus logic and the CRDT audit ledger. This is not a toy reuse — it's the same rigor (property-based testing across invariants, network-partition fault injection) applied to a security-critical log instead of a generic KV store.
 - **Amazon Ads three-agent system** (evidence-grounded, provenance-verified comments; multi-source RAG lifting accuracy 53%→94%; TypeScript MCP server for provenance-verified constraints) → directly supplies the taint-tracking/evidence-grounding design and the choice of MCP as the integration surface. Warden generalizes a pattern already shipped and measured in production, which is a much stronger interview story than an unproven idea.
 - **RAG, LLM evaluation, agentic/multi-agent systems, vector DBs, MCP** (skills list) → exactly the toolset the taint tracker and capability engine need.
-- **Rust, gRPC/Protobuf, Kubernetes, AWS** → exactly the toolset for the proxy, quorum service, and ledger.
+- **C++, gRPC/Protobuf, Kubernetes, AWS** → exactly the toolset for the proxy, quorum service, and ledger.
 
 The interview narrative this produces is unusually strong and hard to fake: *"I noticed that the two published defenses for agentic AI security each solve half the problem — identity-bound auth doesn't check whether reasoning was contaminated, and think/act separation doesn't handle multi-agent attribution — so I built the missing piece using the same consensus and provenance-verification techniques I'd already shipped in a from-scratch Raft/CRDT store and a production evidence-grounding agent, and I benchmarked it against a real injection corpus to get an actual attack-success-rate reduction number."* That is a systems-plus-safety story, told with real numbers, that very few new-grad or intern candidates can tell — which is precisely what a place like OpenAI or Anthropic is filtering for.
 

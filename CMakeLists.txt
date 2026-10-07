@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(warden LANGUAGES CXX)
+project(warden LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,6 +20,8 @@ add_library(warden_core STATIC
     src/quorum.cpp
     src/verifiers.cpp
     src/anthropic_verifier.cpp
+    src/ledger.cpp
+    third_party/sha256.c
 )
 target_include_directories(warden_core PUBLIC include third_party)
 target_link_libraries(warden_core PUBLIC CURL::libcurl)
@@ -37,6 +39,7 @@ add_executable(warden_tests
     tests/test_policy.cpp
     tests/test_attribution.cpp
     tests/test_quorum.cpp
+    tests/test_ledger.cpp
     tests/main.cpp
 )
 target_link_libraries(warden_tests PRIVATE warden::core)

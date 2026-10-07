@@ -48,6 +48,7 @@
 #include "json.hpp"
 #include "warden/anthropic_verifier.hpp"
 #include "warden/attribution.hpp"
+#include "warden/ledger.hpp"
 #include "warden/policy.hpp"
 #include "warden/quorum.hpp"
 #include "warden/taint.hpp"
@@ -128,21 +129,40 @@ std::string truncate(const std::string& s, size_t max_len) {
     return s.size() <= max_len ? s : s.substr(0, max_len) + "...";
 }
 
+// Every audit record is now a real event in a hash-chained CrdtLedger
+// (DESIGN.md 4.4 / NOTES.md M4), not just a flat log line. Each persisted
+// line is the ledger event's own fields (replica_id, lamport_clock,
+// prev_hash, content_hash) plus `payload` as the exact JSON STRING that
+// was hashed -- kept as a string, not re-nested as an object, so a
+// verifier can recompute content_hash byte-for-byte without depending on
+// any JSON library producing identical key ordering on re-serialization.
+// See scripts/ledger/attribute.py for the tool that reads this back,
+// verifies the chain, and walks taint lineage to a root cause.
 class AuditLog {
 public:
-    explicit AuditLog(const std::string& path) : out_(path, std::ios::app) {}
+    AuditLog(const std::string& path, std::string replica_id)
+        : out_(path, std::ios::app), ledger_(std::move(replica_id)) {}
 
-    void record(const json& entry) {
+    void record(json entry) {
         std::lock_guard<std::mutex> lk(mu_);
-        json e = entry;
-        e["ts_unix_ms"] = now_unix_ms();
-        out_ << e.dump() << std::endl;
-        std::cerr << "[warden] " << e.dump() << std::endl;
+        entry["ts_unix_ms"] = now_unix_ms();
+        std::string payload = entry.dump();
+
+        LedgerEvent ev = ledger_.append(payload);
+        json line = {{"replica_id", ev.replica_id},
+                      {"lamport_clock", ev.lamport_clock},
+                      {"prev_hash", ev.prev_hash},
+                      {"content_hash", ev.content_hash},
+                      {"payload", payload}};
+        out_ << line.dump() << std::endl;
+        out_.flush();
+        std::cerr << "[warden] " << payload << std::endl;
     }
 
 private:
     std::mutex mu_;
     std::ofstream out_;
+    CrdtLedger ledger_;
 };
 
 // One JSON-RPC message per line, no embedded newlines — this matches the
@@ -211,7 +231,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    AuditLog audit(cfg.value("audit_log", std::string("warden-audit.log")));
+    std::string replica_id = cfg.value("replica_id", gen_span_id());
+    AuditLog audit(cfg.value("audit_log", std::string("warden-audit.log")), replica_id);
 
     // --- spawn the real downstream MCP server as a child process ---
     int in_pipe[2];   // we write -> child reads (child stdin)

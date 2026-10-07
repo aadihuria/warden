@@ -266,8 +266,57 @@ choice (real API cost), left for whoever runs it next. Fail-safe by
 construction: any HTTP error, non-200 response, or unparseable model
 output abstains rather than silently approving or crashing the proxy.
 
+## M4: CRDT audit ledger (`include/warden/ledger.hpp`)
+
+Implemented the mergeable, tamper-evident audit ledger from DESIGN.md
+4.4: `CrdtLedger` is a per-replica, hash-chained, content-addressed
+append log (each event's `content_hash` is a real SHA-256 — vendored
+Brad Conte's public-domain implementation, `third_party/sha256.{h,c}` —
+derived from every other field, so it doubles as the event's unique id).
+`merge()` is a plain OR-Set union keyed by `content_hash`: tested
+directly (not just asserted) for commutativity, associativity, and
+idempotence, plus an explicit partition-heal scenario (two replicas
+record independently, merge with no loss or duplication, re-merging is a
+no-op). `find_tampered_event()` recomputes every event's hash and checks
+per-replica chain linkage; tested against both a corrupted payload and a
+deleted middle event via explicit test-only corruption hooks, not just
+trusted to work.
+
+**Real bug found and fixed while building this**: the sanitizer build
+caught genuine undefined behavior in the vendored SHA-256 code itself
+(`third_party/sha256.c:49`, now fixed with a comment) — a `BYTE` getting
+promoted to signed `int` before a 24-bit left shift, UB in C whenever the
+byte's top bit is set. Not a Warden bug, but it would have shipped
+silently if the ASan/UBSan build hadn't been in place; fixed rather than
+suppressed, since this hash feeds the ledger's tamper-evidence chain.
+Verified against the standard SHA-256 known-answer test vectors for `""`
+and `"abc"` before and after.
+
+`proxy_main.cpp`'s `AuditLog` now writes through a real `CrdtLedger`
+instead of a flat JSON-lines file — every line persisted is a real ledger
+event (`replica_id`, `lamport_clock`, `prev_hash`, `content_hash`,
+`payload`). `scripts/ledger/attribute.py` reads a persisted log back,
+independently re-verifies the entire hash chain in Python (not trusting
+the C++ process that wrote it), and walks a denied/escalated decision's
+`matched_span_ids` back to the exact `ingest` event (tool + trust tier)
+that caused it — the attribution tool DESIGN.md 4.4 asks for. Verified
+both halves for real: ran it against a genuine audit log from the demo
+and got correct attribution output, then hand-tampered a copy of the
+file (rewrote a `deny` decision to `allow`, simulating an attacker
+editing the log after the fact) and confirmed the tool catches it and
+exits non-zero.
+
+**What's NOT implemented**: actual network replication between live
+Warden instances (gRPC sync, discovery, etc.). This milestone is the
+mergeable data structure and algorithm, which is the prerequisite for
+real replication — not the replication itself. Each running Warden
+instance today still has a single local ledger; merge() works and is
+tested, but nothing currently calls it between two live processes.
+
 ## Next steps (not started)
 
+- Wire real replication between live Warden instances (the actual
+  network transport layer on top of the now-tested merge logic).
 - Run the live verifier for real (valid API key) against the benchmark
   suite to get an actual before/after number with a real model in the
   quorum, not just the stub-quorum numbers above.

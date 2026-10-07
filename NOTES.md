@@ -157,19 +157,101 @@ one request at a time (wait for each response before sending the next —
 see the race-condition note above) and read `action_confidence` in the
 audit log.
 
+## M3: quorum verifier (`include/warden/quorum.hpp`, `verifiers.hpp`)
+
+Implemented the N-verifier fan-out from DESIGN.md 4.3: `EscalateToQuorum`
+now routes to a real decision via `QuorumVerifier` instead of being
+treated as deny. Three deterministic, free stub verifiers (stand-ins for
+real model-backed verifiers, which cost API calls — see
+`scripts/benchmark/agent_backends.py::AnthropicBackend`):
+
+- `KeywordInjectionVerifier` — flags classic injection phrasing in the
+  evidence excerpts.
+- `ArgumentDestinationVerifier` — checks the action's own `to`/`channel`
+  field against a configured trusted-destination allowlist (abstains if
+  the action has no such field, e.g. a file path or hotel ID).
+- `AlwaysApproveVerifier` — explicit placeholder for a third real
+  verifier; not a security control on its own (see its class docstring).
+
+Quorum rule: any single Deny blocks the action outright (fail closed on
+disagreement); Allow needs >= `required_approvals` (default 2) Approves
+with zero Denies; anything else (not enough signal, no denies) escalates
+to human — which, like `EscalateToQuorum` before it, has no real channel
+yet and is currently treated as blocked by the proxy.
+
+**Also corrected a real documentation error in DESIGN.md while building
+this**: section 4.3 originally said verifiers are isolated by being
+denied the untrusted context, but a verifier that can see *nothing* of
+the actual content can't judge anything — that claim didn't survive
+contact with actually building it. The real isolation property, now
+fixed in DESIGN.md: verifiers have **zero tool-execution capability**,
+so a verifier whose own reasoning gets hijacked by content in its
+evidence can only cast a bad vote, never take a real action.
+
+**Re-measured result after wiring the quorum in:**
+
+- False-positive rate: **67% -> 0%**. Both remaining false positives from
+  the M1 fix (weak-confidence legitimate content reuse) now correctly
+  route to quorum instead of being auto-blocked, and the quorum approves
+  them (`ArgumentDestinationVerifier` sees a trusted channel/recipient,
+  `KeywordInjectionVerifier` finds no injection phrasing, 2-of-3 with
+  zero denies -> Allow).
+- Attack success rate: **first run regressed to 50%** (2 of 4 attack
+  scenarios got through) before a fix — see below. Final: back to 0%.
+
+**The regression, and what it actually shows:** `attack_travel_booking_fraud`
+and `attack_workspace_doc_leak` initially got through the quorum. Root
+cause, found by actually reading the evidence text (not assumed):
+`ArgumentDestinationVerifier` has nothing to check for `book_reservation`
+(no `to`/`channel` field — it abstains) or `delete_file` (same), so for
+those risk classes the entire quorum outcome rode on
+`KeywordInjectionVerifier` alone — and its marker list was too narrow
+("ignore the user" didn't match "ignore the requested hotel" or "ignore
+the summary request"). Fixed by broadening the marker list to the
+general phrasing family ("ignore the ...", "disregard previous", "new
+instructions:"), which brought attack success back to 0% on this fixture
+set.
+
+**This is not "solved," and the numbers shouldn't be read that way.**
+Two real, unresolved facts:
+
+1. Keyword matching is structurally evadable by paraphrase — a bigger
+   list is not a fix, it's a slower loss. Both the broadened list here
+   and literally any fixed-phrase list share this property. The actual
+   fix is a model-backed verifier that reasons about intent rather than
+   matching strings, which is exactly why DESIGN.md specifies "different
+   model, not just a rule" for the real verifiers and why
+   `AnthropicBackend`/real verifier integration is still unimplemented,
+   not a nice-to-have.
+2. Any action with no destination-like field (financial bookings, file
+   deletions, code execution) currently has only ONE real independent
+   signal (keywords) backing it, not three — `AlwaysApproveVerifier`
+   contributes nothing and `ArgumentDestinationVerifier` abstains. The
+   quorum's 2-of-3 threshold is currently satisfiable by one real
+   verifier agreeing with a no-op stub for this whole class of action.
+   This is a genuine coverage gap, not a wording issue, and a real
+   verifier (or a destination-style check generalized to "does this
+   action's target resource/amount look consistent with the stated
+   task") is needed before this risk class has real multi-signal
+   coverage.
+
+Measuring this and writing it down honestly — rather than stopping at
+the clean 0%/0% final numbers — is the actual point of having a
+benchmark harness at all.
+
 ## Next steps (not started)
 
-- M3 (quorum verifier) is now the best next lever for the remaining 67%
-  false-positive rate — route `EscalateToQuorum` to an actual decision
-  instead of treating it as deny.
+- Replace `AlwaysApproveVerifier` with a real second signal for
+  destination-less risk classes (FINANCIAL, CODE_EXEC, IRREVERSIBLE_WRITE
+  without a recipient field) — the current quorum has a real coverage
+  gap there (see M3 section above), not just for this fixture set.
+- Integrate a real model-backed verifier (`AnthropicBackend` stub in
+  `scripts/benchmark/agent_backends.py`) — this is the actual fix for
+  keyword-evasion, not a longer marker list.
 - Integrate the real AgentDojo / InjecAgent corpora in place of the
-  hand-authored fixtures (loader swap, see `scripts/benchmark/README.md`)
-  and a real model backend (`AnthropicBackend` is stubbed in
-  `scripts/benchmark/agent_backends.py`) — worth doing now that the
-  false-positive rate is in a defensible range, not 100%.
+  hand-authored fixtures (loader swap, see `scripts/benchmark/README.md`).
 - Swap FNV-1a for SHA-256 before `content_hash` is used anywhere
   security-relevant.
-- The token-overlap heuristic is still just a heuristic (see
-  `include/warden/attribution.hpp` docstring) — a real citation-based or
-  embedding-based approach per DESIGN.md 4.1 would likely separate
-  legitimate grounding from injection better than raw text overlap can.
+- M4: replace the single-node JSON-lines audit log with the replicated,
+  hash-chained CRDT ledger from DESIGN.md 4.4 — now has real content to
+  carry (quorum votes, not just allow/deny).

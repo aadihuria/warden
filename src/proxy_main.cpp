@@ -47,7 +47,9 @@
 #include "json.hpp"
 #include "warden/attribution.hpp"
 #include "warden/policy.hpp"
+#include "warden/quorum.hpp"
 #include "warden/taint.hpp"
+#include "warden/verifiers.hpp"
 
 using json = nlohmann::json;
 using namespace warden;
@@ -106,6 +108,23 @@ struct ToolConfig {
     bool ingests_untrusted = false;
     ActionRiskClass risk_class = ActionRiskClass::ReversibleWrite;
 };
+
+// Pulls each top-level string argument value into a flat list, for
+// verifiers that need to inspect specific fields (e.g. "to", "channel")
+// without the quorum/verifier library depending on a JSON parser.
+std::vector<std::pair<std::string, std::string>> extract_string_fields(const json& args) {
+    std::vector<std::pair<std::string, std::string>> fields;
+    if (args.is_object()) {
+        for (auto& [k, v] : args.items()) {
+            if (v.is_string()) fields.emplace_back(k, v.get<std::string>());
+        }
+    }
+    return fields;
+}
+
+std::string truncate(const std::string& s, size_t max_len) {
+    return s.size() <= max_len ? s : s.substr(0, max_len) + "...";
+}
 
 class AuditLog {
 public:
@@ -242,6 +261,26 @@ int main(int argc, char** argv) {
 
     PolicyEngine policy;
 
+    // M3 quorum: three independent stub verifiers (see
+    // include/warden/verifiers.hpp for why these specific ones and what
+    // "independent" means for deterministic stand-ins). Destination
+    // allowlist is read from config so each deployment can set its own
+    // trusted domains/channels; defaults to an empty allowlist (denies
+    // every destination) if not configured, which is the fail-closed
+    // default — an operator must opt in to trusted destinations.
+    std::vector<std::string> trusted_destinations;
+    if (cfg.contains("trusted_destinations")) {
+        trusted_destinations = cfg["trusted_destinations"].get<std::vector<std::string>>();
+    }
+    int required_approvals = cfg.value("quorum_required_approvals", 2);
+
+    QuorumVerifier quorum(
+        {std::make_shared<KeywordInjectionVerifier>(),
+         std::make_shared<ArgumentDestinationVerifier>(
+             std::vector<std::string>{"to", "channel"}, trusted_destinations),
+         std::make_shared<AlwaysApproveVerifier>()},
+        required_approvals);
+
     // child stdout -> our stdout, tagging taint on untrusted-content tool
     // responses as they pass through.
     std::thread reader_thread([&]() {
@@ -328,7 +367,47 @@ int main(int argc, char** argv) {
                                {"action_confidence", lineage.confidence},
                                {"matched_span_ids", lineage.contributing_span_ids}});
 
-                if (pres.decision != Decision::Allow) {
+                bool allowed = pres.decision == Decision::Allow;
+                std::string block_reason = pres.reason;
+
+                if (pres.decision == Decision::EscalateToQuorum) {
+                    VerificationRequest vreq;
+                    vreq.tool_name = tool_name;
+                    vreq.risk_class = risk;
+                    vreq.confidence = lineage.confidence;
+                    if (msg["params"].contains("arguments")) {
+                        vreq.argument_fields = extract_string_fields(msg["params"]["arguments"]);
+                    }
+                    for (const auto& span_id : lineage.contributing_span_ids) {
+                        for (const auto& span : spans_snapshot) {
+                            if (span.span_id == span_id) {
+                                vreq.evidence.push_back(
+                                    {span.span_id, span.trust_tier, truncate(span.content, 300)});
+                                break;
+                            }
+                        }
+                    }
+
+                    QuorumResult qres = quorum.decide(vreq);
+                    json votes_json = json::array();
+                    for (const auto& v : qres.votes) {
+                        votes_json.push_back({{"verifier", v.verifier_id},
+                                               {"vote", to_string(v.vote)},
+                                               {"justification", v.justification}});
+                    }
+                    audit.record({{"event", "quorum_decision"},
+                                   {"tool", tool_name},
+                                   {"outcome", to_string(qres.outcome)},
+                                   {"reason", qres.reason},
+                                   {"votes", votes_json}});
+
+                    allowed = qres.outcome == QuorumOutcome::Allow;
+                    block_reason = "policy escalated to quorum (" + pres.reason +
+                                    "); quorum outcome " + to_string(qres.outcome) + ": " +
+                                    qres.reason;
+                }
+
+                if (!allowed) {
                     forward = false;
                     json resp = {{"jsonrpc", "2.0"},
                                   {"id", msg.value("id", json(nullptr))},
@@ -337,7 +416,7 @@ int main(int argc, char** argv) {
                                     {"content",
                                      json::array({{{"type", "text"},
                                                     {"text", "Warden blocked this action: " +
-                                                                 pres.reason}}})}}}};
+                                                                 block_reason}}})}}}};
                     write_line(stdout, resp.dump(), stdout_write_mu);
                 } else if (msg.contains("id")) {
                     std::lock_guard<std::mutex> lk(pending_mu);

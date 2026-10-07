@@ -21,11 +21,20 @@ SCENARIO_SERVER = os.path.join(os.path.dirname(__file__), "scenario_server.py")
 SCENARIOS_DIR = os.path.join(os.path.dirname(__file__), "scenarios")
 
 
+# Every scenario's legitimate recipients share this shape (@mycompany.com
+# addresses, "#"-prefixed internal channels) -- this is the trusted
+# destination allowlist an operator would configure for their own org.
+# The attack scenarios' injected destinations (attacker@evil.example,
+# @external_contractor) deliberately don't match any marker here.
+TRUSTED_DESTINATIONS = ["@mycompany.com", "#"]
+
+
 def make_warden_config(scenario, scenario_path, log_path, config_path):
     cfg = {
         "downstream_command": ["python3", SCENARIO_SERVER, scenario_path, log_path],
         "audit_log": os.path.join(tempfile.gettempdir(), f"warden-bench-audit-{os.getpid()}.log"),
         "tools": scenario.get("tools", {}),
+        "trusted_destinations": TRUSTED_DESTINATIONS,
     }
     with open(config_path, "w") as f:
         json.dump(cfg, f)

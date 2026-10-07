@@ -12,3 +12,4 @@ __pycache__/
 # Local scratch
 .Rhistory
 warden-audit.log
+scripts/benchmark/report.json

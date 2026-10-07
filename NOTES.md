@@ -82,12 +82,50 @@ tool calls or multiple simultaneous agent sessions in a later milestone.
 `scripts/demo_driver.py` now drives the proxy the way a real client
 would — one call, read its response, then the next — and documents why.
 
+## M1: first benchmark numbers (hand-authored fixtures, not real corpora yet)
+
+`scripts/benchmark/runner.py` runs 4 attack scenarios + 3 benign-only
+scenarios (mirroring AgentDojo's domain split) through Warden, scored
+against a deterministic stub "agent" (free, no API calls — see
+`scripts/benchmark/README.md`). First real measured result:
+
+- **Attack success rate, hijackable backend: 100% without Warden -> 0%
+  with Warden**, across all 4 attack scenarios (banking exfil, Slack DM
+  leak, workspace file deletion, travel booking fraud).
+- **False-positive rate on benign scenarios: 0% without Warden -> 100%
+  with Warden.**
+
+The false-positive number is not a bug — it's the honest, measured cost
+of simplification #2 above (source-level, not content-level, taint
+tagging). Every benign scenario in this fixture set reads an
+`ingests_untrusted: true` tool before taking an `EXTERNAL_COMM` action
+(read transactions -> email, read channel -> post), which is exactly the
+shape of a huge fraction of real legitimate agent workflows (read
+something, then communicate about it). M0 can't currently tell "this read
+happened to be clean" from "this read was poisoned" — it doesn't try to,
+by design — so it blocks both.
+
+This is the single most important finding from M1 so far: **M0's 100%
+attack-success reduction is not usable in production as-is**, because a
+100% false-positive rate on read-then-communicate workflows makes the
+agent useless for exactly the tasks it exists to do. Per-action
+citation-based taint propagation (DESIGN.md 4.1, item 2 — attributing
+taint to the specific action it justified, not the whole session) isn't
+a nice-to-have refinement anymore; this result makes it the actual
+blocker for anything beyond a proof of concept, and it should be the
+next real milestone of work, ahead of the quorum verifier (M3) or the
+CRDT ledger (M4).
+
 ## Next steps (not started)
 
-- M1: integrate against a real published injection benchmark
-  (AgentDojo / InjecAgent — re-verify current availability, see
-  DESIGN.md open question #1) to get a defensible attack-success-rate
-  number instead of only this hand-crafted demo.
+- Per-action citation-based taint propagation (DESIGN.md 4.1, item 2) —
+  now the priority, per the M1 false-positive finding above, not a later
+  refinement.
+- Integrate the real AgentDojo / InjecAgent corpora in place of the
+  hand-authored fixtures (loader swap, see `scripts/benchmark/README.md`)
+  and a real model backend (`AnthropicBackend` is stubbed in
+  `scripts/benchmark/agent_backends.py`) once the false-positive problem
+  above is addressed — no point spending API credits benchmarking a
+  policy known to be unusable at 100% false positives.
 - Swap FNV-1a for SHA-256 before `content_hash` is used anywhere
   security-relevant.
-- Per-action citation-based taint propagation (DESIGN.md 4.1, item 2).

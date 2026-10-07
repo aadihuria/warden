@@ -1,6 +1,5 @@
-# Rust
-/target
-Cargo.lock
+# C++ build
+/build
 
 # Python
 __pycache__/
@@ -12,3 +11,4 @@ __pycache__/
 
 # Local scratch
 .Rhistory
+warden-audit.log

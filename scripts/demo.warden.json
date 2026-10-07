@@ -1,0 +1,8 @@
+{
+  "downstream_command": ["python3", "scripts/fake_mcp_server.py"],
+  "audit_log": "warden-audit.log",
+  "tools": {
+    "fetch_url": { "ingests_untrusted": true, "risk_class": "READ_ONLY" },
+    "send_email": { "risk_class": "EXTERNAL_COMM" }
+  }
+}

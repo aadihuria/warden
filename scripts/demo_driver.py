@@ -17,14 +17,18 @@ def call(proc, req):
     return json.loads(line)
 
 
-def run_scenario(fetch_first):
+def run_scenario(fetch_first, expect_blocked):
     """fetch_first=True reads an external page before emailing (taints the
     session, per the source-level trust classification — see DESIGN.md
     4.1: the tier is assigned to the SOURCE, not inferred from whether
     this particular page happens to contain a visible injection payload,
     since a content classifier can't be relied on to catch every payload).
     fetch_first=False sends the email directly with a clean session, as
-    the control case."""
+    the control case.
+
+    Returns True on success (actual outcome matched expect_blocked), so
+    this can be used as a real CI check, not just a printout nobody reads.
+    """
     proc = subprocess.Popen(
         ["./build/warden-proxy", "scripts/demo.warden.json"],
         stdin=subprocess.PIPE,
@@ -52,6 +56,7 @@ def run_scenario(fetch_first):
         blocked = r2["result"].get("isError", False)
         print("send_email response:", r2["result"]["content"][0]["text"])
         print("BLOCKED" if blocked else "ALLOWED THROUGH")
+        return blocked == expect_blocked
     finally:
         proc.stdin.close()
         proc.wait()
@@ -59,7 +64,12 @@ def run_scenario(fetch_first):
 
 if __name__ == "__main__":
     print("=== Scenario A: agent reads an untrusted page, then tries to email (should be BLOCKED) ===")
-    run_scenario(fetch_first=True)
+    ok_a = run_scenario(fetch_first=True, expect_blocked=True)
     print()
     print("=== Scenario B: clean session, no untrusted reads (should be ALLOWED) ===")
-    run_scenario(fetch_first=False)
+    ok_b = run_scenario(fetch_first=False, expect_blocked=False)
+
+    if not (ok_a and ok_b):
+        print("\nFAIL: demo did not behave as expected", file=sys.stderr)
+        sys.exit(1)
+    print("\nPASS: both scenarios behaved as expected")

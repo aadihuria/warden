@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libcurl dev headers (Linux only; macOS ships them)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Configure (with ASan/UBSan)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DWARDEN_ENABLE_SANITIZERS=ON
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Unit tests
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Proxy edge cases (no API key needed -- deterministic)
+        run: python3 scripts/proxy_edge_cases.py
+
+      - name: End-to-end demo (poisoned-page exfiltration, with/without Warden)
+        run: python3 scripts/demo_driver.py
+
+      - name: M1/M3 benchmark harness (stub quorum, no API key needed)
+        run: python3 scripts/benchmark/runner.py
+
+      - name: Verify install rules work
+        run: |
+          cmake --install build --prefix "${{ runner.temp }}/warden-install"
+          "${{ runner.temp }}/warden-install/bin/warden-proxy" 2>&1 | grep -q "usage: warden-proxy"

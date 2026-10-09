@@ -53,3 +53,17 @@ endif()
 
 enable_testing()
 add_test(NAME warden_unit_tests COMMAND warden_tests)
+
+# --- install rules, so `cmake --install build` gives a real, usable
+# installed binary (/usr/local/bin/warden-proxy by default) instead of
+# only a build-tree artifact. ---
+include(GNUInstallDirs)
+install(TARGETS warden-proxy
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS warden_core
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(DIRECTORY include/warden
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)

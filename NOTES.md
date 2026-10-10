@@ -307,23 +307,67 @@ editing the log after the fact) and confirmed the tool catches it and
 exits non-zero.
 
 **What's NOT implemented**: actual network replication between live
-Warden instances (gRPC sync, discovery, etc.). This milestone is the
-mergeable data structure and algorithm, which is the prerequisite for
-real replication — not the replication itself. Each running Warden
-instance today still has a single local ledger; merge() works and is
-tested, but nothing currently calls it between two live processes.
+Warden instances (gRPC sync, discovery, etc.) at the time this section
+was first written. **Fixed below.**
+
+## Network replication (`include/warden/replication.hpp`)
+
+Implemented the actual transport layer that moves ledger events between
+two live, separate Warden processes — this was the one explicitly-named
+gap left at the end of M4. Deliberately NOT gRPC, despite DESIGN.md's
+original tech-stack section mentioning it: the protocol surface needed
+is exactly two routes (`GET /ledger/events`, `POST /ledger/sync`), so a
+hand-rolled HTTP/1.1 server over raw POSIX sockets (~100 lines) is a
+smaller, more auditable trusted-computing base than pulling in a full
+RPC framework for two endpoints — consistent with the project's general
+preference for hand-rolled-where-small over dependency-where-heavy (see
+the vendored SHA-256 instead of a crypto library, for the same reason).
+`fetch_peer_events_json` on the client side reuses the already-vendored
+libcurl rather than hand-rolling an HTTP client too, since libcurl was
+already a dependency for the Anthropic verifier.
+
+Server binds to `127.0.0.1` only, not `0.0.0.0` — replication is for
+trusted peer Warden instances an operator deploys together, not a public
+endpoint; exposing it beyond loopback (e.g. across hosts) would need real
+authentication between replicas, which is explicitly out of scope here
+and should be treated as a prerequisite before this is ever bound to a
+non-loopback address.
+
+`CrdtLedger::merge_events()` is a new primitive (returns only the
+actually-new events, not just merges blindly) that both `merge(other)`
+and the replication layer share — the network layer calls it directly on
+events received over HTTP, and `AuditLog::sync_with_peers()` persists
+only the delta to the on-disk log rather than rewriting everything.
+
+**Verified for real, not just in unit tests**: `scripts/replication_demo.py`
+starts two actual, separate `warden-proxy` processes on different ports,
+each recording one decision completely independently (simulating two
+Warden deployments that have never talked to each other), triggers a
+real `POST /ledger/sync` HTTP call between them, and confirms both
+converge to the identical combined event set — then independently
+re-verifies the merged log's hash chain via `scripts/ledger/attribute.py`
+in a separate process, proving a log containing events from two
+different replicas (received over a real network call, not an in-memory
+merge) still verifies correctly. Added to CI (`.github/workflows/ci.yml`)
+so this is checked on every push, not just asserted once locally.
+
+**What's still not here**: peer discovery (peers are statically
+configured, not discovered), authentication between replicas (anyone who
+can reach the loopback port can call `/ledger/sync`), and automatic
+periodic syncing (sync is triggered on demand via `POST /ledger/sync`,
+not on a background timer — a trivial addition, a thread calling the
+same `sync_with_peers` on an interval, left undone because a timer-based
+test is inherently flakier to verify deterministically than an
+explicitly-triggered one).
 
 ## Next steps (not started)
 
-- Wire real replication between live Warden instances (the actual
-  network transport layer on top of the now-tested merge logic).
+- Automatic periodic sync (background timer thread) instead of only
+  on-demand `POST /ledger/sync`.
+- Authentication between replication peers before this is ever exposed
+  beyond localhost.
 - Run the live verifier for real (valid API key) against the benchmark
   suite to get an actual before/after number with a real model in the
   quorum, not just the stub-quorum numbers above.
 - Integrate the real AgentDojo / InjecAgent corpora in place of the
   hand-authored fixtures (loader swap, see `scripts/benchmark/README.md`).
-- Swap FNV-1a for SHA-256 before `content_hash` is used anywhere
-  security-relevant.
-- M4: replace the single-node JSON-lines audit log with the replicated,
-  hash-chained CRDT ledger from DESIGN.md 4.4 — now has real content to
-  carry (quorum votes, not just allow/deny).

@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -51,6 +52,7 @@
 #include "warden/ledger.hpp"
 #include "warden/policy.hpp"
 #include "warden/quorum.hpp"
+#include "warden/replication.hpp"
 #include "warden/taint.hpp"
 #include "warden/verifiers.hpp"
 
@@ -147,19 +149,54 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         entry["ts_unix_ms"] = now_unix_ms();
         std::string payload = entry.dump();
-
         LedgerEvent ev = ledger_.append(payload);
+        write_event_line_locked(ev);
+        std::cerr << "[warden] " << payload << std::endl;
+    }
+
+    // Serves the replication server's GET /ledger/events route.
+    std::string events_json() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return warden::events_to_json(ledger_.ordered_events());
+    }
+
+    // Pulls GET /ledger/events from every peer, merges new events into
+    // the local ledger, persists the delta to disk (so the on-disk log
+    // reflects merged state, not just in-memory), and returns how many
+    // were new in total. An unreachable peer is logged and skipped, not
+    // fatal -- that's exactly the partition-tolerance property the
+    // merge algorithm (NOTES.md M4) exists for.
+    int sync_with_peers(const std::vector<std::string>& peers) {
+        int total_new = 0;
+        for (const auto& peer : peers) {
+            std::string body;
+            if (!fetch_peer_events_json(peer, body)) {
+                std::cerr << "[warden] replication: peer " << peer << " unreachable, skipping\n";
+                continue;
+            }
+            auto remote_events = warden::events_from_json(body);
+            std::lock_guard<std::mutex> lk(mu_);
+            auto newly_added = ledger_.merge_events(remote_events);
+            for (const auto& ev : newly_added) write_event_line_locked(ev);
+            total_new += static_cast<int>(newly_added.size());
+        }
+        if (total_new > 0) {
+            std::cerr << "[warden] replication: merged " << total_new << " new event(s)\n";
+        }
+        return total_new;
+    }
+
+private:
+    void write_event_line_locked(const LedgerEvent& ev) {
         json line = {{"replica_id", ev.replica_id},
                       {"lamport_clock", ev.lamport_clock},
                       {"prev_hash", ev.prev_hash},
                       {"content_hash", ev.content_hash},
-                      {"payload", payload}};
+                      {"payload", ev.payload}};
         out_ << line.dump() << std::endl;
         out_.flush();
-        std::cerr << "[warden] " << payload << std::endl;
     }
 
-private:
     std::mutex mu_;
     std::ofstream out_;
     CrdtLedger ledger_;
@@ -233,6 +270,34 @@ int main(int argc, char** argv) {
 
     std::string replica_id = cfg.value("replica_id", gen_span_id());
     AuditLog audit(cfg.value("audit_log", std::string("warden-audit.log")), replica_id);
+
+    // Optional network replication (DESIGN.md 4.4 / NOTES.md M4's
+    // explicitly-left-open item): if the config has a "replication"
+    // block, expose this replica's ledger over a local HTTP endpoint and
+    // configure the peers it pulls from on each POST /ledger/sync.
+    // Local-loopback only (see ReplicationServer::start) -- this is for
+    // trusted peer Warden instances, not a public sync endpoint.
+    std::unique_ptr<ReplicationServer> replication_server;
+    if (cfg.contains("replication")) {
+        auto& rep_cfg = cfg["replication"];
+        int listen_port = rep_cfg.value("listen_port", 0);
+        std::vector<std::string> peers;
+        if (rep_cfg.contains("peers")) {
+            peers = rep_cfg["peers"].get<std::vector<std::string>>();
+        }
+        if (listen_port > 0) {
+            replication_server = std::make_unique<ReplicationServer>(
+                listen_port, peers, [&audit]() { return audit.events_json(); },
+                [&audit, peers]() { return audit.sync_with_peers(peers); });
+            if (replication_server->start()) {
+                std::cerr << "[warden] replication server on 127.0.0.1:" << listen_port
+                          << " (" << peers.size() << " peer(s) configured)\n";
+            } else {
+                std::cerr << "[warden] replication: failed to bind port " << listen_port << "\n";
+                replication_server.reset();
+            }
+        }
+    }
 
     // --- spawn the real downstream MCP server as a child process ---
     int in_pipe[2];   // we write -> child reads (child stdin)

@@ -34,10 +34,10 @@ struct LedgerEvent {
 // it's exactly what's unit-tested in tests/test_ledger.cpp rather than
 // just asserted.
 //
-// NOT implemented here: actual network transport between live replicas
-// (gRPC sync, etc.) — this is the mergeable DATA STRUCTURE and algorithm
-// DESIGN.md 4.4 calls for, which is the prerequisite for real
-// replication, not the replication itself. See NOTES.md.
+// This is the mergeable DATA STRUCTURE and algorithm; the actual network
+// transport that moves events between live replicas lives in
+// include/warden/replication.hpp (a minimal hand-rolled HTTP sync layer,
+// not gRPC — see NOTES.md for why).
 class CrdtLedger {
 public:
     explicit CrdtLedger(std::string replica_id);
@@ -48,6 +48,13 @@ public:
     // OR-Set union: every event in `other` not already present (by
     // content_hash) is added. Safe to call repeatedly / in any order.
     void merge(const CrdtLedger& other);
+
+    // Same OR-Set union, but from a raw event list (e.g. events received
+    // over the network, see include/warden/replication.hpp) rather than
+    // another CrdtLedger instance, and returns only the events that were
+    // ACTUALLY new (not already present) -- callers that need to persist
+    // only the delta (not re-write everything) use this instead of merge().
+    std::vector<LedgerEvent> merge_events(const std::vector<LedgerEvent>& events);
 
     // All known events (this replica's own plus anything merged in),
     // in a deterministic total order: (lamport_clock, replica_id,

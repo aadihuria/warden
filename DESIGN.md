@@ -232,7 +232,7 @@ Event {
 - Byzantine-tolerant quorum logic with configurable N/f, unit-tested the way Raft leader election was fault-injection-tested in Concord.
 
 **M4 — CRDT audit ledger + attribution tooling.**
-- Replicated, hash-chained event log using OR-Set/RGA merge semantics (reuse the CRDT design from the Concord project; reimplement the layer in C++ and expose it via a gRPC service plus a thin Python binding, e.g. pybind11, for the attribution CLI/dashboard).
+- Replicated, hash-chained event log using OR-Set/RGA merge semantics (reuse the CRDT design from the Concord project; reimplement the layer in C++). **Implementation note (post-M4):** shipped as a hand-rolled, two-route HTTP/1.1 sync layer over raw sockets rather than gRPC — the protocol surface needed (`GET /ledger/events`, `POST /ledger/sync`) is small enough that a full RPC framework added more dependency surface than it removed complexity; see NOTES.md for the reasoning and the attribution tool, which ended up as a Python script (`scripts/ledger/attribute.py`) rather than a pybind11 binding, for the same reason — no compiled binding needed for a tool that just reads JSON lines and recomputes hashes.
 - Build a small attribution CLI/dashboard: given a bad-outcome event_id, walk `contributing_span_ids` backward and print the responsible agent/tool/source chain.
 - Fault-injection test: partition two Warden replicas, generate decisions on both sides, heal partition, assert deterministic merge with no lost/duplicated audit events (same test discipline as Concord's network-partition tests).
 

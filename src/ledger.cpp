@@ -59,6 +59,16 @@ void CrdtLedger::merge(const CrdtLedger& other) {
     }
 }
 
+std::vector<LedgerEvent> CrdtLedger::merge_events(const std::vector<LedgerEvent>& events) {
+    std::vector<LedgerEvent> newly_added;
+    for (const auto& ev : events) {
+        if (events_.emplace(ev.content_hash, ev).second) {
+            newly_added.push_back(ev);
+        }
+    }
+    return newly_added;
+}
+
 std::vector<LedgerEvent> CrdtLedger::ordered_events() const {
     std::vector<LedgerEvent> out;
     out.reserve(events_.size());

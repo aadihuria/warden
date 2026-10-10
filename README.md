@@ -24,16 +24,27 @@ analysis, and architecture.
 
 ## Status
 
-M0–M4 implemented and tested (taint tracking, policy engine, quorum
-verifier — including a real Claude-backed verifier, hash-chained audit
-ledger with an attribution tool). See [NOTES.md](./NOTES.md) for the
-actual measured results at each stage, including the false-positive
-regression that got found and fixed, not just the clean final numbers.
+M0–M5 implemented and tested: taint tracking, policy engine, quorum
+verifier (including a real Claude-backed verifier), hash-chained audit
+ledger with an attribution tool, and real network replication between
+live Warden instances (two separate processes syncing over actual HTTP,
+not just an in-memory merge — see `scripts/replication_demo.py`). CI
+runs the full suite — unit tests under ASan/UBSan, the attack demo, the
+benchmark, and the live two-process replication test — on every push.
+See [NOTES.md](./NOTES.md) for the actual measured results at each
+stage, including a false-positive regression and a real UB bug in a
+vendored dependency that got found and fixed, not just the clean final
+numbers.
 
 Benchmarked on a hand-authored fixture set mirroring AgentDojo's domain
 split (banking/Slack/workspace/travel): **100% → 0% attack success rate,
 0% false-positive rate**, with a real model-backed verifier available
 (not yet run against a live corpus — see NOTES.md).
+
+Still open: peer authentication/discovery for replication, automatic
+(vs. on-demand) sync, and a live benchmark run against a real
+AgentDojo/InjecAgent corpus with a paid API key — see NOTES.md's "Next
+steps" for the honest remaining list.
 
 ## Quickstart
 
@@ -115,11 +126,31 @@ Independently re-verifies the entire hash chain and, for any blocked or
 escalated decision, walks back to the exact tool call that supplied the
 taint that caused it.
 
+### Run two Warden instances and watch them sync for real
+
+```bash
+python3 scripts/replication_demo.py
+```
+
+Starts two real, separate `warden-proxy` processes on different ports,
+each recording a decision independently, triggers a real HTTP sync
+between them, and verifies both converge to the identical, hash-chain-
+verified combined log. To do this yourself: add a `"replication"` block
+to a config —
+
+```json
+"replication": { "listen_port": 7001, "peers": ["http://127.0.0.1:7002"] }
+```
+
+— then `curl -X POST http://127.0.0.1:7001/ledger/sync` to pull in any
+new events from configured peers.
+
 ## Repo layout
 
 - `include/warden/`, `src/` — the core library: trust lattice & taint
   attribution, policy engine, quorum verifier (+ a real Claude-backed
-  verifier), CRDT audit ledger.
+  verifier), CRDT audit ledger, and the HTTP replication layer that syncs
+  ledgers between live instances.
 - `src/proxy_main.cpp` — the MCP stdio proxy itself.
 - `tests/` — 66 unit tests, run under ASan/UBSan.
 - `scripts/benchmark/` — the attack-success-rate / false-positive

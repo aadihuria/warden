@@ -39,6 +39,9 @@ jobs:
       - name: M1/M3 benchmark harness (stub quorum, no API key needed)
         run: python3 scripts/benchmark/runner.py
 
+      - name: M4 network replication (two real processes, real HTTP sync)
+        run: python3 scripts/replication_demo.py
+
       - name: Verify install rules work
         run: |
           cmake --install build --prefix "${{ runner.temp }}/warden-install"

@@ -21,6 +21,7 @@ add_library(warden_core STATIC
     src/verifiers.cpp
     src/anthropic_verifier.cpp
     src/ledger.cpp
+    src/replication.cpp
     third_party/sha256.c
 )
 target_include_directories(warden_core PUBLIC include third_party)
@@ -40,6 +41,7 @@ add_executable(warden_tests
     tests/test_attribution.cpp
     tests/test_quorum.cpp
     tests/test_ledger.cpp
+    tests/test_replication.cpp
     tests/main.cpp
 )
 target_link_libraries(warden_tests PRIVATE warden::core)

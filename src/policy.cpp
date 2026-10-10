@@ -36,36 +36,35 @@ PolicyResult PolicyEngine::evaluate(const PolicyInput& input) const {
     }
 
     // EXTERNAL_COMM justified by untrusted external content is the
-    // canonical "lethal trifecta" case (DESIGN.md section 1/4.2) — deny
-    // outright rather than escalate, since M0 has no quorum service to
-    // escalate to yet.
+    // canonical "lethal trifecta" case (DESIGN.md section 1/4.2).
+    //
+    // IMPORTANT: this used to deny outright on confidence >= 0.4,
+    // skipping the quorum entirely, on the reasoning that strong textual
+    // overlap was more likely to be a real injection citation than a
+    // coincidence. That reasoning turned out to be wrong in an important
+    // way once a larger benchmark set was run (see NOTES.md): LEGITIMATE
+    // actions that relay something the agent genuinely just read (a
+    // meeting link, a ticket number) also produce high overlap
+    // confidence, because the agent is, correctly, copying real content
+    // verbatim. High overlap confidence means "this action is clearly
+    // connected to this untrusted span" — it does NOT mean "this
+    // connection is malicious." Only the quorum's destination-aware
+    // check (ArgumentDestinationVerifier) can actually tell those apart,
+    // so skipping the quorum on confidence alone was silently throwing
+    // away the one signal that matters most. Always escalate instead —
+    // confidence is still passed through to the quorum for its own use,
+    // but it no longer gates a direct deny.
     if (input.risk_class == ActionRiskClass::ExternalComm) {
         if (tier == TrustTier::UntrustedExternal) {
-            // A span only enters the lineage at all once its content
-            // overlaps the action above attribute_taint()'s match
-            // threshold, so confidence here is already bounded away from
-            // zero. Split on a second, higher bar: strong textual overlap
-            // denies outright, weaker (but still above the inclusion
-            // threshold) overlap escalates instead, since it's more
-            // likely to be a coincidental match than a clean citation.
-            if (input.taint_lineage.confidence >= 0.4) {
-                return {Decision::Deny,
-                        "external communication strongly justified by untrusted "
-                        "external content (confidence=" +
-                            std::to_string(input.taint_lineage.confidence) + ")"};
-            }
             return {Decision::EscalateToQuorum,
-                    "external communication weakly linked to untrusted external "
-                    "content (confidence=" +
-                        std::to_string(input.taint_lineage.confidence) +
-                        ") — requires quorum (not yet implemented in M0, see "
-                        "DESIGN.md M3)"};
+                    "external communication linked to untrusted external content "
+                    "(confidence=" + std::to_string(input.taint_lineage.confidence) +
+                        ") — requires quorum"};
         }
         if (tier == TrustTier::UntrustedInternal) {
             return {Decision::EscalateToQuorum,
                     "external communication influenced by unverified "
-                    "internal agent output — requires quorum (not yet "
-                    "implemented in M0, see DESIGN.md M3)"};
+                    "internal agent output — requires quorum"};
         }
         return {Decision::Allow, "external communication with clean provenance"};
     }
@@ -80,7 +79,7 @@ PolicyResult PolicyEngine::evaluate(const PolicyInput& input) const {
             return {Decision::EscalateToQuorum,
                     to_string(input.risk_class) +
                         " action with non-principal provenance — requires "
-                        "quorum (not yet implemented in M0, see DESIGN.md M3)"};
+                        "quorum"};
         }
         return {Decision::Allow, "high-risk action with clean (principal) provenance"};
     }
@@ -91,8 +90,7 @@ PolicyResult PolicyEngine::evaluate(const PolicyInput& input) const {
         if (tier == TrustTier::UntrustedExternal) {
             return {Decision::EscalateToQuorum,
                     "reversible write justified by untrusted external content "
-                    "— requires quorum (not yet implemented in M0, see "
-                    "DESIGN.md M3)"};
+                    "— requires quorum"};
         }
         return {Decision::Allow, "reversible write with acceptable provenance"};
     }

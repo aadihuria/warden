@@ -11,11 +11,18 @@ plan (section 6).
   injection payloads for attack scenarios) and logs every tool call it
   actually receives — i.e. every call that got *past* Warden — to a
   JSONL log, which is how the runner scores attack success.
-- `scenarios/*.json` — hand-authored scenario fixtures across four
-  domains mirroring AgentDojo's own domain split (banking, Slack, email/
-  workspace, travel): 4 attack scenarios (poisoned tool output tries to
-  trigger an unauthorized high-risk action) and 3 benign-only scenarios
-  (no injection at all, used to measure false positives).
+- `scenarios/*.json` — hand-authored scenario fixtures across six domains
+  (banking, Slack, email/workspace, travel, calendar, CRM, devops): 8
+  attack scenarios (poisoned tool output tries to trigger an unauthorized
+  high-risk action — including deliberate evasion variants that avoid
+  obvious keyword markers, to honestly test detection limits rather than
+  only confirm easy cases work) and 8 benign-only scenarios spanning
+  every risk class, not just EXTERNAL_COMM (no injection at all, used to
+  measure false positives). A scenario can set `"known_limitation": true`
+  to mark it as a deliberately adversarial stress test of a documented
+  gap (see NOTES.md) — reported in the summary but excluded from the CI
+  regression gate, since failing CI on an already-known, already-
+  documented limitation just trains people to ignore CI failures.
 - `agent_backends.py` — pluggable "agent" that decides what to do next.
   `StubBackend` is free and deterministic: `gullible=True` simulates an
   agent that complies with any injected instruction it sees (the

@@ -41,10 +41,21 @@ TEST_CASE("READ_ONLY is always allowed, tainted or not") {
     REQUIRE(r2.decision == Decision::Allow);
 }
 
-TEST_CASE("EXTERNAL_COMM justified by untrusted external content is denied") {
+TEST_CASE("EXTERNAL_COMM linked to untrusted external content always escalates to quorum") {
+    // Used to deny directly above a confidence threshold, bypassing the
+    // quorum entirely -- changed after benchmarking showed that high
+    // overlap confidence also fires on LEGITIMATE verbatim content relay
+    // (e.g. forwarding a link the agent just read), which only the
+    // quorum's destination-aware check can actually distinguish from a
+    // real attack. See src/policy.cpp and NOTES.md for the full story.
     PolicyEngine policy;
-    auto r = policy.evaluate({"send_email", ActionRiskClass::ExternalComm, tainted_external()});
-    REQUIRE(r.decision == Decision::Deny);
+    auto r_high = policy.evaluate(
+        {"send_email", ActionRiskClass::ExternalComm, tainted_external(/*confidence=*/0.9)});
+    REQUIRE(r_high.decision == Decision::EscalateToQuorum);
+
+    auto r_low = policy.evaluate(
+        {"send_email", ActionRiskClass::ExternalComm, tainted_external(/*confidence=*/0.2)});
+    REQUIRE(r_low.decision == Decision::EscalateToQuorum);
 }
 
 TEST_CASE("EXTERNAL_COMM with clean provenance is allowed") {
@@ -129,7 +140,7 @@ TEST_CASE("FINANCIAL escalates even on the lightest taint (OPERATOR)") {
 TEST_CASE("empty tool_name does not crash policy evaluation") {
     PolicyEngine policy;
     auto r = policy.evaluate({"", ActionRiskClass::ExternalComm, tainted_external()});
-    REQUIRE(r.decision == Decision::Deny);
+    REQUIRE(r.decision == Decision::EscalateToQuorum);
 }
 
 TEST_CASE("an out-of-range risk class value falls through to the conservative default") {

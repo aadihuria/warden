@@ -36,15 +36,32 @@ stage, including a false-positive regression and a real UB bug in a
 vendored dependency that got found and fixed, not just the clean final
 numbers.
 
-Benchmarked on a hand-authored fixture set mirroring AgentDojo's domain
-split (banking/Slack/workspace/travel): **100% → 0% attack success rate,
-0% false-positive rate**, with a real model-backed verifier available
-(not yet run against a live corpus — see NOTES.md).
+Benchmarked on a 16-scenario, 6-domain hand-authored fixture set
+(banking/Slack/workspace/travel/calendar/CRM/devops), including
+deliberate evasion variants designed to break the detection, not just
+confirm it works:
+
+| | result |
+|---|---|
+| Core attack success rate (7 scenarios, classic + varied injection phrasing) | **100% → 0%** with Warden |
+| Stress/evasion attack success rate (1 scenario, deliberately keyword-evading + no destination field) | **100%** — a real, documented, honest gap, not hidden (see NOTES.md) |
+| False-positive rate (8 scenarios, all risk classes) | **0%** |
+| Steady-state latency through Warden | **p50 0.9ms / p95 1.2ms / p99 1.25ms** |
+
+A real model-backed verifier is implemented and available (auto-
+activates on `ANTHROPIC_API_KEY`) but not yet run against the above —
+all numbers are from the free, deterministic quorum. This expanded
+benchmark also caught and fixed a real bug: an earlier version let high
+taint-attribution confidence bypass the quorum entirely, which denied
+legitimate actions that happened to relay real content verbatim (e.g.
+forwarding a meeting link) — see NOTES.md for the full story, not just
+the fixed number.
 
 Still open: peer authentication/discovery for replication, automatic
-(vs. on-demand) sync, and a live benchmark run against a real
-AgentDojo/InjecAgent corpus with a paid API key — see NOTES.md's "Next
-steps" for the honest remaining list.
+(vs. on-demand) sync, closing the destination-less evasion gap above
+(needs a real verifier, not a bigger keyword list), and a live benchmark
+run against a real AgentDojo/InjecAgent corpus with a paid API key — see
+NOTES.md's "Next steps" for the honest remaining list.
 
 ## Quickstart
 

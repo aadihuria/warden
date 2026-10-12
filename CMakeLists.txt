@@ -10,6 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(WARDEN_ENABLE_SANITIZERS "Build with ASan/UBSan enabled" OFF)
+option(WARDEN_ENABLE_TSAN "Build with ThreadSanitizer enabled (mutually exclusive with ASan)" OFF)
 
 find_package(CURL REQUIRED)
 
@@ -50,6 +51,13 @@ if(WARDEN_ENABLE_SANITIZERS)
     foreach(tgt warden_core warden-proxy warden_tests)
         target_compile_options(${tgt} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
+
+if(WARDEN_ENABLE_TSAN)
+    foreach(tgt warden_core warden-proxy warden_tests)
+        target_compile_options(${tgt} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+        target_link_options(${tgt} PRIVATE -fsanitize=thread)
     endforeach()
 endif()
 

@@ -429,6 +429,31 @@ targets) — measured separately from cold-start/first-call latency
 itself, not proxy overhead) so process-startup noise doesn't inflate the
 number that actually matters.
 
+## ThreadSanitizer run + real throughput numbers
+
+Added a `WARDEN_ENABLE_TSAN` CMake option (mutually exclusive with
+ASan — they can't run in the same build) and ran the full test suite
+plus the most concurrency-heavy real path in the codebase (the
+replication server's accept-loop thread + reader thread + main thread,
+all touching shared mutex-protected state, under a real two-process
+network replication run) under ThreadSanitizer. **No data races found.**
+This specifically targeted the parts of the code with real shared
+mutable state (`AuditLog`'s mutex, `spans_mu`, `pending_mu`), not just
+the parts that were already easy to get right.
+
+Also measured real throughput and latency on an actual Release build
+(no sanitizers — ASan/UBSan add real overhead, so a performance claim
+measured under them isn't honest): **647 calls/sec sustained on a single
+sequential connection, p50 1.5ms / p99 2.9ms end-to-end** (5,000 calls
+through the full proxy + a Python downstream stub). Important framing
+note: this measures the full round trip including the downstream
+server's own overhead (a Python subprocess), not Warden's isolated
+processing time in isolation, and it's a SEQUENTIAL single-connection
+number — this architecture is one proxy process per agent session (like
+an MCP server), not a multi-tenant network server, so a "concurrent
+req/s across many clients" framing doesn't actually describe this
+system and shouldn't be claimed.
+
 ## Next steps (not started)
 
 - Automatic periodic sync (background timer thread) instead of only

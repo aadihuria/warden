@@ -50,6 +50,7 @@
 #include "json.hpp"
 #include "warden/anthropic_verifier.hpp"
 #include "warden/attribution.hpp"
+#include "warden/fastscan.hpp"
 #include "warden/ledger.hpp"
 #include "warden/policy.hpp"
 #include "warden/quorum.hpp"
@@ -476,6 +477,19 @@ int main(int argc, char** argv) {
     std::string raw;
     while (read_line(stdin, raw)) {
         bool forward = true;
+        // Zero-copy pre-classification: most MCP traffic through this
+        // loop (initialize, notifications, tools/list, resource reads)
+        // is never going to be a tools/call, so skip the real cost of a
+        // full JSON parse+allocation for lines that provably can't be
+        // one. See include/warden/fastscan.hpp for the safety argument
+        // (this never produces a false negative, only occasional safe
+        // false positives) and tests/test_fastscan.cpp for the explicit
+        // test of the one case that would make a naive version of this
+        // unsafe (an escaped-slash "tools\/call" method name).
+        if (!might_be_tools_call(raw)) {
+            write_line(child_stdin, raw, child_stdin_write_mu);
+            continue;
+        }
         try {
             json msg = json::parse(raw);
             if (msg.value("method", std::string()) == "tools/call" && msg.contains("params")) {

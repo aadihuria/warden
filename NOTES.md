@@ -546,6 +546,31 @@ assumed from the unit tests alone (which cover `compute_version_vector`,
 `encode`/`decode_version_vector`, and `delta_since` directly — 9 new
 tests, `tests/test_replication.cpp`).
 
+## Zero-copy fast-path classification (`include/warden/fastscan.hpp`)
+
+Every line through the proxy's main stdin loop used to get a full
+`nlohmann::json::parse()` (real allocation, real parsing work) even
+though the result was thrown away for every message that wasn't a
+`tools/call` — which is most MCP traffic (initialize, notifications,
+`tools/list`, resource reads, pings). Added `might_be_tools_call()`: a
+zero-copy substring scan over the raw line (`std::string_view::find`, no
+allocation) that skips the full parse entirely for lines that provably
+can't be a `tools/call`.
+
+**The safety argument is the actual point of this, not the speedup.** A
+naive version of this (searching for the literal substring
+`"tools/call"`) would have been a real security bug: valid JSON is
+allowed to escape `/` as `\/`, so a conformant MCP client could encode
+the method as `"tools\/call"`, and a literal search would silently miss
+it — skipping the ENTIRE policy/taint/quorum check for that message and
+forwarding it straight through unchecked. Searching for just the `"tools`
+prefix instead is provably safe: no valid encoding of `tools/call` can
+avoid containing that prefix, so the only failure mode is an occasional
+unnecessary full parse (e.g. `tools/list` also matches), never a missed
+check. `tests/test_fastscan.cpp` tests the escaped-slash case explicitly
+— not a hypothetical, an actual regression test for the exact bug this
+design avoids.
+
 ## Next steps (not started)
 
 - Automatic periodic sync (background timer thread) instead of only

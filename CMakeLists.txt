@@ -24,6 +24,7 @@ add_library(warden_core STATIC
     src/ledger.cpp
     src/replication.cpp
     src/curl_init.cpp
+    src/fastscan.cpp
     third_party/sha256.c
 )
 find_package(Threads REQUIRED)
@@ -43,6 +44,7 @@ add_executable(warden_tests
     tests/test_quorum.cpp
     tests/test_ledger.cpp
     tests/test_replication.cpp
+    tests/test_fastscan.cpp
     tests/main.cpp
 )
 target_link_libraries(warden_tests PRIVATE warden::core)

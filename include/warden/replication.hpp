@@ -58,7 +58,11 @@ private:
     std::function<std::string()> get_events_json_;
     std::function<int()> sync_now_;
     std::atomic<bool> running_{false};
-    int listen_fd_ = -1;
+    // atomic, not plain int: stop() (main thread) and accept_loop()
+    // (accept thread) both touch this concurrently during shutdown.
+    // ThreadSanitizer caught a real data race here when this was a plain
+    // int -- see NOTES.md.
+    std::atomic<int> listen_fd_{-1};
     std::thread accept_thread_;
 };
 

@@ -32,6 +32,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -338,8 +339,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::mutex spans_mu;
-    std::vector<Span> known_spans;
+    // Lock-free span store: an RCU-style (read-copy-update) atomic
+    // snapshot instead of a mutex-protected vector. The reader thread
+    // (ingest, below) is the sole writer; the main stdin loop (the fast
+    // path every tools/call goes through) is the sole reader. A writer
+    // builds a whole new immutable vector and atomically swaps the
+    // pointer via std::atomic_store; a reader does a single
+    // std::atomic_load to get a consistent snapshot it can iterate
+    // without ever blocking on a lock or seeing a torn/partial write.
+    // This lives in proxy_main.cpp (an executable, not a library target)
+    // so it isn't covered by a unit test directly -- it's exercised by
+    // the demo/benchmark/replication scripts and verified race-free
+    // under ThreadSanitizer (see NOTES.md).
+    std::shared_ptr<const std::vector<Span>> known_spans_ptr =
+        std::make_shared<const std::vector<Span>>();
 
     std::mutex pending_mu;
     std::unordered_map<std::string, std::string> pending_tool_by_id;  // json id dump -> tool name
@@ -421,8 +434,11 @@ int main(int argc, char** argv) {
                         span.content = content_text;
 
                         {
-                            std::lock_guard<std::mutex> lk(spans_mu);
-                            known_spans.push_back(span);
+                            auto old_snapshot = std::atomic_load(&known_spans_ptr);
+                            auto new_snapshot = std::make_shared<std::vector<Span>>(*old_snapshot);
+                            new_snapshot->push_back(span);
+                            std::atomic_store(&known_spans_ptr,
+                                               std::shared_ptr<const std::vector<Span>>(new_snapshot));
                         }
                         audit.record({{"event", "ingest"},
                                        {"tool", tool_name},
@@ -456,13 +472,10 @@ int main(int argc, char** argv) {
                     collect_text(msg["params"]["arguments"], action_text);
                 }
 
-                std::vector<Span> spans_snapshot;
-                {
-                    std::lock_guard<std::mutex> lk(spans_mu);
-                    spans_snapshot = known_spans;
-                }
+                std::shared_ptr<const std::vector<Span>> spans_snapshot =
+                    std::atomic_load(&known_spans_ptr);
 
-                TaintLineage lineage = attribute_taint(action_text, spans_snapshot);
+                TaintLineage lineage = attribute_taint(action_text, *spans_snapshot);
                 PolicyResult pres = policy.evaluate({tool_name, risk, lineage});
 
                 audit.record({{"event", "decision"},
@@ -488,7 +501,7 @@ int main(int argc, char** argv) {
                         vreq.argument_fields = extract_string_fields(msg["params"]["arguments"]);
                     }
                     for (const auto& span_id : lineage.contributing_span_ids) {
-                        for (const auto& span : spans_snapshot) {
+                        for (const auto& span : *spans_snapshot) {
                             if (span.span_id == span_id) {
                                 vreq.evidence.push_back(
                                     {span.span_id, span.trust_tier, truncate(span.content, 300)});

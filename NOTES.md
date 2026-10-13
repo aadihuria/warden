@@ -454,6 +454,65 @@ an MCP server), not a multi-tenant network server, so a "concurrent
 req/s across many clients" framing doesn't actually describe this
 system and shouldn't be claimed.
 
+## Performance engineering pass: lock-free span store, async quorum, and a real race TSan caught
+
+Three real architecture changes, made because a resume bullet draft
+claimed things about the system that weren't true yet ("lock-free fast
+path", "asynchronous quorum workers") — rather than write false claims
+into any document, built the real thing and measured it.
+
+- **Async quorum dispatch** (`src/quorum.cpp`): `QuorumVerifier::decide()`
+  now launches every verifier's `vote()` on its own thread via
+  `std::async` and joins via `future::get()`, instead of calling them one
+  after another. Total quorum latency is now bounded by the slowest
+  verifier, not the sum of all of them — matters most once a real,
+  network-bound model-backed verifier is in the mix. Caught and fixed a
+  real bug while writing this: the first draft captured the range-for
+  loop variable by reference in the async lambda, a classic dangling-
+  reference hazard. Fixed by capturing the `shared_ptr<Verifier>` by
+  value (just a refcount bump, not a real copy).
+
+- **Lock-free span store** (`src/proxy_main.cpp`): replaced the mutex-
+  protected `std::vector<Span>` with an RCU-style atomic snapshot
+  (`std::shared_ptr<const std::vector<Span>>`, swapped via
+  `std::atomic_load`/`std::atomic_store`). The ingest path (reader
+  thread) is the sole writer and builds a whole new immutable vector per
+  write; the fast path every `tools/call` goes through (main thread) does
+  a single atomic load to get a consistent snapshot, never blocking on a
+  lock. This is real lock-free code for the actual concurrency model
+  here (single writer, single reader), not a label applied after the
+  fact.
+
+- **A real data race, found and fixed.** Running the new concurrent code
+  under ThreadSanitizer (not just ASan/UBSan, which can't catch races —
+  see the TSan section above) found a genuine bug on the first real
+  stress run: `ReplicationServer::listen_fd_` was a plain `int`, written
+  by `stop()` on the main thread while concurrently read by
+  `accept_loop()` on the accept thread during shutdown — a classic
+  shutdown-race. Fixed by making it `std::atomic<int>` with explicit
+  `.load()`/`.store()` calls. Fixing it surfaced a second, unrelated
+  issue: with `listen_fd_` now a `std::atomic<int>`, the unqualified
+  `bind(...)` call became ambiguous with `std::bind` via ADL on the
+  atomic's associated `std` namespace — a real compile error, fixed by
+  explicitly `::`-qualifying the POSIX socket calls. Re-ran the exact
+  scenario that found the race 5 times after the fix, plus the full
+  16-scenario benchmark suite and the unit tests, all under TSan: clean.
+  Added a dedicated `thread-sanitizer` CI job (`.github/workflows/ci.yml`)
+  so this is checked on every push going forward, not just this one
+  manual run — including re-running the benchmark and replication demo
+  against the TSan-instrumented binary specifically to keep exercising
+  the concurrent paths, not just the unit tests.
+
+- **Thread safety of libcurl under concurrent dispatch**: once quorum
+  verifiers run concurrently, `AnthropicVerifier` and the replication
+  client's `curl_easy_init()` calls could race on libcurl's implicit
+  first-use global initialization, which libcurl's own documentation
+  says is not safe under concurrent first calls. Added
+  `include/warden/curl_init.hpp` / `src/curl_init.cpp`: a single
+  `std::call_once`-guarded `curl_global_init()` shared by both call
+  sites, closing this before it ever had a chance to manifest as a real
+  bug rather than waiting to find it the hard way.
+
 ## Next steps (not started)
 
 - Automatic periodic sync (background timer thread) instead of only

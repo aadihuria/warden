@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "json.hpp"
+#include "warden/curl_init.hpp"
 
 using json = nlohmann::json;
 
@@ -76,6 +77,7 @@ VerifierVote AnthropicVerifier::vote(const VerificationRequest& req) const {
     };
     std::string body_str = body.dump();
 
+    ensure_curl_global_init();
     CURL* curl = curl_easy_init();
     if (!curl) {
         return {id(), Vote::Abstain, "failed to initialize HTTP client"};

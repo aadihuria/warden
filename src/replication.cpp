@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "json.hpp"
+#include "warden/curl_init.hpp"
 
 using json = nlohmann::json;
 
@@ -78,11 +79,11 @@ ReplicationServer::ReplicationServer(int port, std::vector<std::string> peers,
 ReplicationServer::~ReplicationServer() { stop(); }
 
 bool ReplicationServer::start() {
-    listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd_ < 0) return false;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
 
     int opt = 1;
-    setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -93,17 +94,20 @@ bool ReplicationServer::start() {
                                                        // NOTES.md.
     addr.sin_port = htons(static_cast<uint16_t>(port_));
 
-    if (bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(listen_fd_);
-        listen_fd_ = -1;
+    // Explicitly ::-qualified: with listen_fd_ now a std::atomic<int>,
+    // unqualified `bind(...)` was ambiguous with std::bind via ADL on
+    // the atomic's associated std namespace -- a real compile error this
+    // fix surfaced, not just style.
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(fd);
         return false;
     }
-    if (listen(listen_fd_, 16) < 0) {
-        close(listen_fd_);
-        listen_fd_ = -1;
+    if (::listen(fd, 16) < 0) {
+        close(fd);
         return false;
     }
 
+    listen_fd_.store(fd);
     running_ = true;
     accept_thread_ = std::thread(&ReplicationServer::accept_loop, this);
     return true;
@@ -112,17 +116,20 @@ bool ReplicationServer::start() {
 void ReplicationServer::stop() {
     if (!running_) return;
     running_ = false;
-    if (listen_fd_ >= 0) {
-        shutdown(listen_fd_, SHUT_RDWR);
-        close(listen_fd_);
-        listen_fd_ = -1;
+    int fd = listen_fd_.load();
+    if (fd >= 0) {
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+        listen_fd_.store(-1);
     }
     if (accept_thread_.joinable()) accept_thread_.join();
 }
 
 void ReplicationServer::accept_loop() {
     while (running_) {
-        int client_fd = accept(listen_fd_, nullptr, nullptr);
+        int fd = listen_fd_.load();
+        if (fd < 0) break;
+        int client_fd = ::accept(fd, nullptr, nullptr);
         if (client_fd < 0) {
             if (!running_) break;
             continue;
@@ -169,6 +176,7 @@ void ReplicationServer::handle_connection(int client_fd) {
 }
 
 bool fetch_peer_events_json(const std::string& peer_base_url, std::string& out_json) {
+    ensure_curl_global_init();
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 

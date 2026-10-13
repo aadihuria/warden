@@ -46,3 +46,42 @@ jobs:
         run: |
           cmake --install build --prefix "${{ runner.temp }}/warden-install"
           "${{ runner.temp }}/warden-install/bin/warden-proxy" 2>&1 | grep -q "usage: warden-proxy"
+
+  thread-sanitizer:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libcurl dev headers (Linux only; macOS ships them)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+      # TSan is mutually exclusive with ASan in the same build, so this
+      # runs as a separate job/binary rather than alongside the main
+      # build-and-test job. This job's whole purpose is catching real
+      # data races in the concurrent code paths (quorum verifier
+      # dispatch, the lock-free span store, the replication server's
+      # accept-loop/shutdown path) -- see NOTES.md for a real race this
+      # exact check caught and the fix that resolved it.
+      - name: Configure (ThreadSanitizer)
+        run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DWARDEN_ENABLE_TSAN=ON
+
+      - name: Build
+        run: cmake --build build-tsan -j
+
+      - name: Unit tests under TSan
+        working-directory: build-tsan
+        run: ctest --output-on-failure
+
+      - name: Benchmark suite under TSan (exercises concurrent quorum dispatch)
+        run: |
+          mkdir -p build
+          cp build-tsan/warden-proxy build/warden-proxy
+          python3 scripts/benchmark/runner.py
+
+      - name: Network replication under TSan (exercises accept-loop + lock-free span store)
+        run: python3 scripts/replication_demo.py

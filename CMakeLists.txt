@@ -23,18 +23,18 @@ add_library(warden_core STATIC
     src/anthropic_verifier.cpp
     src/ledger.cpp
     src/replication.cpp
+    src/curl_init.cpp
     third_party/sha256.c
 )
+find_package(Threads REQUIRED)
 target_include_directories(warden_core PUBLIC include third_party)
-target_link_libraries(warden_core PUBLIC CURL::libcurl)
+target_link_libraries(warden_core PUBLIC CURL::libcurl Threads::Threads)
 
 add_library(warden::core ALIAS warden_core)
 
 add_executable(warden-proxy src/proxy_main.cpp)
 target_include_directories(warden-proxy PRIVATE third_party)
 target_link_libraries(warden-proxy PRIVATE warden::core)
-find_package(Threads REQUIRED)
-target_link_libraries(warden-proxy PRIVATE Threads::Threads)
 
 add_executable(warden_tests
     tests/test_taint.cpp

@@ -571,6 +571,52 @@ check. `tests/test_fastscan.cpp` tests the escaped-slash case explicitly
 — not a hypothetical, an actual regression test for the exact bug this
 design avoids.
 
+## Real concurrent load test (`scripts/load_test.py`)
+
+A resume bullet draft claimed "<800μs p99 fast-path verdict latency
+under 10k+ req/s concurrent load." Rather than write that down unverified,
+built a real load test and measured it — matched to this architecture's
+ACTUAL concurrency model, which matters: Warden is one process per agent
+session (like an MCP server), not a multi-tenant network server, so
+"concurrent load" here means many simultaneous agent sessions, each with
+their own Warden process, all hitting their fast path (READ_ONLY, no
+quorum) at once — not many clients sharing one server process.
+
+Measured on a 10-physical-core machine, Release build (no sanitizers —
+they'd make the number dishonest as a performance claim):
+
+| Concurrent processes | Total calls | Aggregate throughput | Steady-state p50 / p95 / p99 |
+|---|---|---|---|
+| 50 | 5,000 | 12,452 calls/sec | 0.40ms / 7.55ms / 16.66ms |
+| 100 | 20,000 | 18,119 calls/sec | 0.83ms / 12.10ms / 47.21ms |
+
+**The honest comparison to the original claim**: aggregate throughput
+DOES cross 10k/sec, but p99 latency is 16-47ms depending on load, not
+sub-millisecond, let alone <800μs. The gap is real and explainable, not
+mysterious: each call's latency includes the full round trip through a
+Python downstream subprocess (the test fixture's fake MCP server), not
+just Warden's own C++ decision logic in isolation, and at 100 concurrent
+processes this machine is running 200 total OS processes (100 Warden +
+100 Python downstreams) on 10 physical cores — real oversubscription,
+which is exactly why p99 degrades from 17ms to 47ms between the two
+rows while p50 only moves from 0.4ms to 0.8ms (the median call is barely
+affected; the TAIL is where contention shows up, which is the expected
+signature of resource contention, not an algorithmic problem in Warden
+itself).
+
+**What would actually close this gap, if it mattered for a real
+deployment**: isolating Warden's own per-call overhead from the
+downstream round-trip (a benign no-op downstream instead of a Python
+subprocess) and testing on hardware with enough cores to not oversubscribe
+at the target concurrency — neither was done here because the honest
+end-to-end number (what an agent actually experiences) is more useful
+than a number engineered to look better by removing realistic downstream
+cost. Cold-start/first-call latency (process + downstream spawn,
+unavoidable per new agent session) is reported separately from
+steady-state for the same reason as the sequential benchmark in
+`scripts/benchmark/runner.py` — it shouldn't be blended into the number
+that represents ongoing per-call cost.
+
 ## Next steps (not started)
 
 - Automatic periodic sync (background timer thread) instead of only

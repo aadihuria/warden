@@ -50,6 +50,62 @@ std::vector<LedgerEvent> events_from_json(const std::string& json_str) {
     return out;
 }
 
+VersionVector compute_version_vector(const std::vector<LedgerEvent>& events) {
+    VersionVector vv;
+    for (const auto& ev : events) {
+        auto it = vv.find(ev.replica_id);
+        if (it == vv.end() || ev.lamport_clock > it->second) {
+            vv[ev.replica_id] = ev.lamport_clock;
+        }
+    }
+    return vv;
+}
+
+std::string encode_version_vector(const VersionVector& vv) {
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto& [replica_id, clock] : vv) {
+        if (!first) oss << ',';
+        first = false;
+        oss << replica_id << ':' << clock;
+    }
+    return oss.str();
+}
+
+VersionVector decode_version_vector(const std::string& encoded) {
+    VersionVector vv;
+    std::istringstream stream(encoded);
+    std::string entry;
+    while (std::getline(stream, entry, ',')) {
+        auto colon = entry.rfind(':');
+        if (colon == std::string::npos) continue;
+        std::string replica_id = entry.substr(0, colon);
+        std::string clock_str = entry.substr(colon + 1);
+        if (replica_id.empty() || clock_str.empty()) continue;
+        try {
+            vv[replica_id] = static_cast<uint64_t>(std::stoull(clock_str));
+        } catch (const std::exception&) {
+            // Malformed entry from an untrusted peer -- skip it rather
+            // than fail the whole vector. Missing entries just mean
+            // "send everything from this replica," which is always safe
+            // (worst case: redundant data, never lost data).
+            continue;
+        }
+    }
+    return vv;
+}
+
+std::vector<LedgerEvent> delta_since(const std::vector<LedgerEvent>& events,
+                                      const VersionVector& since) {
+    std::vector<LedgerEvent> out;
+    for (const auto& ev : events) {
+        auto it = since.find(ev.replica_id);
+        uint64_t known_clock = (it == since.end()) ? 0 : it->second;
+        if (ev.lamport_clock > known_clock) out.push_back(ev);
+    }
+    return out;
+}
+
 namespace {
 
 size_t curl_write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -71,7 +127,7 @@ std::string http_response(int status, const std::string& status_text, const std:
 }  // namespace
 
 ReplicationServer::ReplicationServer(int port, std::vector<std::string> peers,
-                                      std::function<std::string()> get_events_json,
+                                      std::function<std::string(const VersionVector&)> get_events_json,
                                       std::function<int()> sync_now)
     : port_(port), peers_(std::move(peers)), get_events_json_(std::move(get_events_json)),
       sync_now_(std::move(sync_now)) {}
@@ -153,15 +209,33 @@ void ReplicationServer::handle_connection(int client_fd) {
     }
 
     std::istringstream request_line_stream(request);
-    std::string method, path, version;
-    request_line_stream >> method >> path >> version;
+    std::string method, path_and_query, version;
+    request_line_stream >> method >> path_and_query >> version;
+
+    // Split "/ledger/events?since=..." into path + query. replica_ids
+    // (and therefore the whole encoded version vector) are plain hex
+    // strings with no URL-reserved characters, so no percent-decoding is
+    // needed here -- see encode_version_vector's doc comment for that
+    // invariant.
+    std::string path = path_and_query;
+    std::string query;
+    auto qpos = path_and_query.find('?');
+    if (qpos != std::string::npos) {
+        path = path_and_query.substr(0, qpos);
+        query = path_and_query.substr(qpos + 1);
+    }
 
     std::string body;
     int status = 200;
     std::string status_text = "OK";
 
     if (method == "GET" && path == "/ledger/events") {
-        body = get_events_json_();
+        VersionVector since;
+        const std::string prefix = "since=";
+        if (query.rfind(prefix, 0) == 0) {
+            since = decode_version_vector(query.substr(prefix.size()));
+        }
+        body = get_events_json_(since);
     } else if (method == "POST" && path == "/ledger/sync") {
         int merged = sync_now_();
         body = json{{"merged_new_events", merged}}.dump();
@@ -175,13 +249,17 @@ void ReplicationServer::handle_connection(int client_fd) {
     write(client_fd, response.data(), response.size());
 }
 
-bool fetch_peer_events_json(const std::string& peer_base_url, std::string& out_json) {
+bool fetch_peer_events_json(const std::string& peer_base_url,
+                             const VersionVector& local_version_vector, std::string& out_json) {
     ensure_curl_global_init();
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
     std::string response_body;
     std::string url = peer_base_url + "/ledger/events";
+    if (!local_version_vector.empty()) {
+        url += "?since=" + encode_version_vector(local_version_vector);
+    }
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);

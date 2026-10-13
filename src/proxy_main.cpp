@@ -155,23 +155,40 @@ public:
         std::cerr << "[warden] " << payload << std::endl;
     }
 
-    // Serves the replication server's GET /ledger/events route.
-    std::string events_json() {
+    // Serves the replication server's GET /ledger/events route. `since`
+    // (the requester's own version vector) makes this delta-state sync:
+    // only events the requester doesn't already have (per origin
+    // replica) are returned, not the whole ledger every time.
+    std::string events_json(const VersionVector& since) {
         std::lock_guard<std::mutex> lk(mu_);
-        return warden::events_to_json(ledger_.ordered_events());
+        auto all_events = ledger_.ordered_events();
+        return warden::events_to_json(since.empty() ? all_events
+                                                      : warden::delta_since(all_events, since));
     }
 
-    // Pulls GET /ledger/events from every peer, merges new events into
-    // the local ledger, persists the delta to disk (so the on-disk log
-    // reflects merged state, not just in-memory), and returns how many
-    // were new in total. An unreachable peer is logged and skipped, not
-    // fatal -- that's exactly the partition-tolerance property the
-    // merge algorithm (NOTES.md M4) exists for.
+    // This replica's own version vector (max lamport_clock per origin
+    // replica it currently knows about) -- attached to outgoing sync
+    // requests so peers can compute a delta instead of sending
+    // everything.
+    VersionVector local_version_vector() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return warden::compute_version_vector(ledger_.ordered_events());
+    }
+
+    // Pulls GET /ledger/events from every peer (attaching this
+    // replica's version vector so each peer sends only its delta),
+    // merges new events into the local ledger, persists the delta to
+    // disk (so the on-disk log reflects merged state, not just
+    // in-memory), and returns how many were new in total. An
+    // unreachable peer is logged and skipped, not fatal -- that's
+    // exactly the partition-tolerance property the merge algorithm
+    // (NOTES.md M4) exists for.
     int sync_with_peers(const std::vector<std::string>& peers) {
         int total_new = 0;
+        VersionVector my_vv = local_version_vector();
         for (const auto& peer : peers) {
             std::string body;
-            if (!fetch_peer_events_json(peer, body)) {
+            if (!fetch_peer_events_json(peer, my_vv, body)) {
                 std::cerr << "[warden] replication: peer " << peer << " unreachable, skipping\n";
                 continue;
             }
@@ -288,7 +305,8 @@ int main(int argc, char** argv) {
         }
         if (listen_port > 0) {
             replication_server = std::make_unique<ReplicationServer>(
-                listen_port, peers, [&audit]() { return audit.events_json(); },
+                listen_port, peers,
+                [&audit](const VersionVector& since) { return audit.events_json(since); },
                 [&audit, peers]() { return audit.sync_with_peers(peers); });
             if (replication_server->start()) {
                 std::cerr << "[warden] replication server on 127.0.0.1:" << listen_port

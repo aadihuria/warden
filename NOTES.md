@@ -513,6 +513,39 @@ into any document, built the real thing and measured it.
   sites, closing this before it ever had a chance to manifest as a real
   bug rather than waiting to find it the hard way.
 
+## Delta-CRDT replication (version vectors, not full-state every sync)
+
+`GET /ledger/events` previously always returned this replica's ENTIRE
+event set on every call — correct (it's still a valid OR-Set union
+source either way), but wasteful: two long-running replicas syncing
+repeatedly would re-transmit everything they'd already exchanged, every
+time. Implemented real delta-state sync instead:
+
+- `compute_version_vector()` (`include/warden/replication.hpp`): the max
+  `lamport_clock` known per origin `replica_id`.
+- A peer attaches its own version vector as `?since=replica_id:clock,...`
+  on its `GET /ledger/events` request (`encode_version_vector` /
+  `decode_version_vector` — plain colon/comma encoding, no percent-
+  encoding needed since `replica_id`s are always hex strings).
+- The server filters via `delta_since()` before responding: only events
+  with a higher clock than what the requester already has FOR THAT
+  SPECIFIC ORIGIN REPLICA are sent (an unknown `replica_id` in the
+  requester's vector is treated as clock 0 — "send everything from a
+  replica I've never seen," which is always safe: worst case redundant
+  data, never lost data).
+
+**Verified for real, not just in unit tests**: ran a live proxy, fetched
+its full ledger over HTTP (4 events), computed a version vector from
+that response the way a real peer would, re-requested with that vector
+attached — got back 0 events, confirming the server actually filters
+server-side rather than just accepting the parameter. Then triggered one
+more tool call (2 more events) and re-requested with the SAME `since`
+vector: got back exactly those 2 new events, not the full 6. That's the
+actual payoff of "delta," proven over a real HTTP round trip, not
+assumed from the unit tests alone (which cover `compute_version_vector`,
+`encode`/`decode_version_vector`, and `delta_since` directly — 9 new
+tests, `tests/test_replication.cpp`).
+
 ## Next steps (not started)
 
 - Automatic periodic sync (background timer thread) instead of only
